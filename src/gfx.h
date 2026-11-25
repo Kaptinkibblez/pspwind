@@ -12,6 +12,7 @@
 #ifndef PSPWIND_GFX_H
 #define PSPWIND_GFX_H
 
+#include "actor.h"
 #include "common.h"
 #include "vfpu.h"
 #include "zone.h"
@@ -28,6 +29,15 @@ typedef struct {
 
 enum { GFX_CULL_CW = 0, GFX_CULL_CCW = 1, GFX_CULL_OFF = 2 };
 
+/* View direction: yaw 0 looks north (+Y), positive yaw turns east. */
+static inline void gfx_camera_forward(const Camera *cam, Vec4 *fwd)
+{
+    float sy, cy, sp, cp;
+    pw_sincosf(cam->yaw, &sy, &cy);
+    pw_sincosf(cam->pitch, &sp, &cp);
+    *fwd = vec4(sy * cp, cy * cp, sp, 0.0f);
+}
+
 typedef struct {
     int cull_mode;       /* GFX_CULL_*: which winding the GE treats as front */
     int near_terrain;    /* re-tessellate terrain near the camera */
@@ -41,16 +51,18 @@ typedef struct {
     uint32_t culled;
     uint32_t tex_binds;
     uint32_t near_quads;
+    uint32_t actors;
     uint32_t list_bytes;
 } GfxStats;
 
 int gfx_init(void);
 void gfx_shutdown(void);
 void gfx_default_options(GfxOptions *o);
-void gfx_camera_forward(const Camera *cam, Vec4 *fwd);
 
 void gfx_begin_frame(uint32_t clear_abgr);
-void gfx_draw_zone(const Zone *z, const Camera *cam, const GfxOptions *opt, GfxStats *stats);
+/* actors may be NULL */
+void gfx_draw_zone(const Zone *z, const ActorSet *actors, const Camera *cam,
+                   const GfxOptions *opt, GfxStats *stats);
 /* Finishes the display list, waits for the GE, lets the caller draw debug
  * text into the finished frame (overlay may be NULL) and flips at vblank. */
 void gfx_end_frame(void (*overlay)(void *user), void *user);

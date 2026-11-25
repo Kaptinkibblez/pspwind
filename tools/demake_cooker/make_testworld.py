@@ -111,6 +111,9 @@ def textures() -> Dict[str, bytes]:
         "textures/tx_tw_glow.dds": _dds(_noise_img(64, (250, 210, 120), (5, 10, 10), 10)),
         "textures/water/water00.dds": _dds(_noise_img(128, (40, 80, 110), (8, 12, 14), 11)),
         "icons/tw/tx_coin.dds": _dds(_noise_img(32, (220, 180, 40), (20, 20, 10), 12)),
+        "textures/tx_tw_skin.dds": _dds(_noise_img(64, (196, 150, 120), (10, 8, 8), 13)),
+        "textures/tx_tw_cloth.dds": _dds(_planks(64, (70, 90, 130), 14)),
+        "textures/tx_tw_shell.dds": _dds(_noise_img(64, (150, 80, 50), (20, 12, 10), 15)),
     }
 
 
@@ -194,11 +197,11 @@ class NifBuilder:
 def mesh_house() -> bytes:
     b = NifBuilder()
     root = b.placeholder()
-    walls = b.textured("Tri Walls", box(256, 192, 160, cz=160, uv_scale=2.0), "tx_tw_bricks")
-    roof = b.textured("Tri Roof", pyramid(300, 236, 320, 520), "tx_tw_roof")
+    walls = b.textured("Tri Walls", box(512, 384, 300, cz=90, uv_scale=2.0), "tx_tw_bricks")  # foundation sunk 60 units
+    roof = b.textured("Tri Roof", pyramid(300, 236, 240, 420), "tx_tw_roof")
     coll = b.placeholder()
     cbox = b.placeholder()
-    cdata = b.add(S.shape_data(*[box(256, 192, 260, cz=260)[i] for i in (0, 3)]))
+    cdata = b.add(S.shape_data(*[box(512, 384, 240, cz=120)[i] for i in (0, 3)]))
     b.set(cbox, S.shape("Tri Collision", cdata, flags=1))
     b.set(coll, S.node("Collision", [cbox], kind="RootCollisionNode"))
     b.set(root, S.node("House", [walls, roof, coll]))
@@ -259,6 +262,186 @@ def mesh_cellar_room() -> bytes:
                        "tx_tw_bricks")
     b.set(root, S.node("Cellar", [walls]))
     return b.build(root)
+
+
+# --------------------------------------------------------------------------
+# actors: Biped-style skeleton, race body parts, animations, a creature
+# --------------------------------------------------------------------------
+
+def _side(name: str, x: float):
+    """Right side is +X (characters face +Y)."""
+    return [(name.format(s="R", side="Right"), x), (name.format(s="L", side="Left"), -x)]
+
+
+def skeleton_def():
+    """(name, parent, local translation) in parent-first order."""
+    bones = [("Bip01", None, (0.0, 0.0, 0.0)),
+             ("Bip01 Pelvis", "Bip01", (0.0, 0.0, 72.0)),
+             ("Groin", "Bip01 Pelvis", (0.0, 0.0, 0.0)),
+             ("Bip01 Spine", "Bip01 Pelvis", (0.0, 0.0, 8.0)),
+             ("Bip01 Spine1", "Bip01 Spine", (0.0, 0.0, 22.0)),
+             ("Chest", "Bip01 Spine1", (0.0, 0.0, 0.0)),
+             ("Bip01 Neck", "Bip01 Spine1", (0.0, 0.0, 26.0)),
+             ("Bip01 Head", "Bip01 Neck", (0.0, 0.0, 8.0)),
+             ("Head", "Bip01 Head", (0.0, 0.0, 0.0))]
+    for s_, side in (("R", "Right"), ("L", "Left")):
+        sx = 1.0 if s_ == "R" else -1.0
+        bones += [(f"Bip01 {s_} UpperArm", "Bip01 Spine1", (17.0 * sx, 0.0, 22.0)),
+                  (f"{side} Upper Arm", f"Bip01 {s_} UpperArm", (0.0, 0.0, 0.0)),
+                  (f"Bip01 {s_} Forearm", f"Bip01 {s_} UpperArm", (0.0, 0.0, -24.0)),
+                  (f"{side} Forearm", f"Bip01 {s_} Forearm", (0.0, 0.0, 0.0)),
+                  (f"Bip01 {s_} Hand", f"Bip01 {s_} Forearm", (0.0, 0.0, -22.0)),
+                  (f"{side} Hand", f"Bip01 {s_} Hand", (0.0, 0.0, 0.0)),
+                  (f"Bip01 {s_} Thigh", "Bip01 Pelvis", (8.0 * sx, 0.0, -4.0)),
+                  (f"{side} Upper Leg", f"Bip01 {s_} Thigh", (0.0, 0.0, 0.0)),
+                  (f"Bip01 {s_} Calf", f"Bip01 {s_} Thigh", (0.0, 0.0, -32.0)),
+                  (f"Bip01 {s_} Foot", f"Bip01 {s_} Calf", (0.0, 0.0, -32.0)),
+                  (f"{side} Foot", f"Bip01 {s_} Foot", (0.0, 0.0, 0.0))]
+    return bones
+
+
+def skeleton_world_z(name: str) -> float:
+    pos = {n: (p, t) for n, p, t in skeleton_def()}
+    z = 0.0
+    while name is not None:
+        p, t = pos[name]
+        z += t[2]
+        name = p
+    return z
+
+
+def build_skeleton(b: "NifBuilder", extra_children: Dict[str, List[int]] = None) -> Dict[str, int]:
+    """Adds all skeleton nodes; returns bone name -> block ref (root = 'Bip01')."""
+    extra_children = extra_children or {}
+    refs = {name: b.placeholder() for name, _p, _t in skeleton_def()}
+    for name, parent, t in skeleton_def():
+        kids = [refs[n] for n, p, _t in skeleton_def() if p == name] + extra_children.get(name, [])
+        b.set(refs[name], S.node(name, kids, t=t))
+    return refs
+
+
+def mesh_skeleton() -> bytes:
+    b = NifBuilder()
+    root = b.placeholder()
+    refs = build_skeleton(b)
+    b.set(root, S.node("Skeleton", [refs["Bip01"]]))
+    return b.build(root)
+
+
+def mesh_folk_chest(texture: str) -> bytes:
+    """Skinned torso: lower half on Bip01 Spine, upper half on Bip01 Spine1."""
+    b = NifBuilder()
+    root = b.placeholder()
+    shape = b.placeholder()
+    refs = build_skeleton(b)
+    verts, normals, uvs, tris = box(34, 18, 56, cz=104)
+    data = b.add(S.shape_data(verts, tris, normals=normals, uvs=uvs))
+    spine_z, spine1_z = skeleton_world_z("Bip01 Spine"), skeleton_world_z("Bip01 Spine1")
+    w0 = [(i, 1.0) for i, v in enumerate(verts) if v[2] < spine1_z]
+    w1 = [(i, 1.0) for i, v in enumerate(verts) if v[2] >= spine1_z]
+    sdata = b.add(S.skin_data([(S.I9, (0.0, 0.0, -spine_z), 1.0, w0),
+                               (S.I9, (0.0, 0.0, -spine1_z), 1.0, w1)]))
+    skin = b.add(S.skin_instance(sdata, refs["Bip01"], [refs["Bip01 Spine"], refs["Bip01 Spine1"]]))
+    src = b.add(S.source_texture(f"Textures\\{texture}.tga"))
+    tex = b.add(S.texturing(src))
+    b.set(shape, S.shape("Tri Chest", data, props=[tex], skin=skin))
+    b.set(root, S.node("Chest Part", [refs["Bip01"], shape]))
+    return b.build(root)
+
+
+def mesh_rigid_part(name: str, size, centre, texture: str) -> bytes:
+    """Unskinned body part authored in its attachment bone's space."""
+    b = NifBuilder()
+    root = b.placeholder()
+    v, n, uv, t = box(*size, cz=0.0)
+    v = [(x + centre[0], y + centre[1], z + centre[2]) for x, y, z in v]
+    shape = b.textured(f"Tri {name}", (v, n, uv, t), texture)
+    b.set(root, S.node(name, [shape]))
+    return b.build(root)
+
+
+def anim_xbase() -> bytes:
+    """Idle (0-2 s, breathing) and WalkForward (2-3 s, limb swing + 120 u/s root motion)."""
+    X = (1.0, 0.0, 0.0)
+    def swing(sign):
+        return [(0.0, S.quat_axis(X, 0.0)), (2.0, S.quat_axis(X, 0.0)),
+                (2.25, S.quat_axis(X, 0.5 * sign)), (2.75, S.quat_axis(X, -0.5 * sign)),
+                (3.0, S.quat_axis(X, 0.0))]
+    tracks = [
+        ("Bip01", S.keyframe_track_data([], [(0.0, (0.0, 0.0, 0.0)), (2.0, (0.0, 0.0, 0.0)),
+                                             (2.5, (0.0, 60.0, 2.0)), (3.0, (0.0, 120.0, 0.0))])),
+        ("Bip01 Spine1", S.keyframe_track_data([(0.0, S.quat_axis(X, 0.0)), (1.0, S.quat_axis(X, 0.06)),
+                                                (2.0, S.quat_axis(X, 0.0))], [])),
+        ("Bip01 R UpperArm", S.keyframe_track_data(swing(1.0), [])),
+        ("Bip01 L UpperArm", S.keyframe_track_data(swing(-1.0), [])),
+        ("Bip01 R Thigh", S.keyframe_track_data(swing(-1.0), [])),
+        ("Bip01 L Thigh", S.keyframe_track_data(swing(1.0), [])),
+    ]
+    keys = [(0.0, "Idle: Start"), (2.0, "Idle: Stop\r\nWalkForward: Start"),
+            (2.25, "SoundGen: Left"), (3.0, "WalkForward: Stop")]
+    return S.kf_file(keys, tracks)
+
+
+def mesh_critter() -> bytes:
+    """Skinned creature: body on 'Bip01 Body', tail on 'Bip01 Tail'."""
+    b = NifBuilder()
+    root = b.placeholder()
+    shape = b.placeholder()
+    tail = b.add(S.node("Bip01 Tail", [], t=(0.0, -30.0, 0.0)))
+    body = b.add(S.node("Bip01 Body", [tail], t=(0.0, 0.0, 20.0)))
+    bip = b.add(S.node("Bip01", [body]))
+    v1, n1, uv1, t1 = box(40, 50, 24, cz=20)
+    v2, n2, uv2, t2 = box(8, 30, 8, cz=20)
+    v2 = [(x, y - 40.0, z) for x, y, z in v2]
+    verts, normals, uvs = v1 + v2, n1 + n2, uv1 + uv2
+    tris = t1 + [(a + len(v1), b_ + len(v1), c + len(v1)) for a, b_, c in t2]
+    data = b.add(S.shape_data(verts, tris, normals=normals, uvs=uvs))
+    sdata = b.add(S.skin_data([(S.I9, (0.0, 0.0, -20.0), 1.0, [(i, 1.0) for i in range(len(v1))]),
+                               (S.I9, (0.0, 30.0, -20.0), 1.0,
+                                [(i + len(v1), 1.0) for i in range(len(v2))])]))
+    skin = b.add(S.skin_instance(sdata, bip, [body, tail]))
+    src = b.add(S.source_texture("Textures\\tx_tw_shell.tga"))
+    tex = b.add(S.texturing(src))
+    b.set(shape, S.shape("Tri Critter", data, props=[tex], skin=skin))
+    b.set(root, S.node("Critter", [bip, shape]))
+    return b.build(root)
+
+
+def anim_critter() -> bytes:
+    Z = (0.0, 0.0, 1.0)
+    tail = [(0.0, S.quat_axis(Z, 0.0)), (0.4, S.quat_axis(Z, 0.6)), (1.2, S.quat_axis(Z, -0.6)),
+            (1.6, S.quat_axis(Z, 0.0))]
+    return S.kf_file([(0.0, "Idle: Start"), (1.6, "Idle: Stop")],
+                     [("Bip01 Tail", S.keyframe_track_data(tail, []))])
+
+
+PARTS = {  # BODY id -> (BYDT part, female, mesh key, rigid spec or None)
+    "tw_folk_chest": (3, False, "tw/b_folk_chest", None),
+    "tw_folk_chest_f": (3, True, "tw/b_folk_chest_f", None),
+    "tw_folk_head": (0, False, "tw/b_folk_head", ((18, 20, 22), (0.0, 1.0, 11.0), "tx_tw_skin")),
+    "tw_folk_groin": (4, False, "tw/b_folk_groin", ((26, 16, 14), (0.0, 0.0, -4.0), "tx_tw_cloth")),
+    "tw_folk_upperarm": (8, False, "tw/b_folk_upperarm", ((8, 8, 24), (0.0, 0.0, -12.0), "tx_tw_cloth")),
+    "tw_folk_forearm": (7, False, "tw/b_folk_forearm", ((7, 7, 22), (0.0, 0.0, -11.0), "tx_tw_skin")),
+    "tw_folk_hand": (5, False, "tw/b_folk_hand", ((6, 9, 12), (0.0, 0.0, -6.0), "tx_tw_skin")),
+    "tw_folk_upperleg": (12, False, "tw/b_folk_upperleg", ((12, 12, 32), (0.0, 0.0, -16.0), "tx_tw_cloth")),
+    "tw_folk_foot": (9, False, "tw/b_folk_foot", ((10, 20, 8), (0.0, -4.0, 0.0), "tx_tw_planks")),
+}
+
+
+def actor_files() -> Dict[str, bytes]:
+    files = {"meshes/base_anim.nif": mesh_skeleton(),
+             "meshes/xbase_anim.kf": anim_xbase(),
+             "meshes/tw/critter.nif": mesh_critter(),
+             "meshes/tw/xcritter.nif": mesh_critter(),
+             "meshes/tw/xcritter.kf": anim_critter()}
+    for _bid, (part, _female, key, rigid) in PARTS.items():
+        if rigid is None:
+            tex = "tx_tw_cloth" if key.endswith("_f") else "tx_tw_planks"
+            files[f"meshes/{key}.nif"] = mesh_folk_chest(tex)
+        else:
+            size, centre, tex = rigid
+            files[f"meshes/{key}.nif"] = mesh_rigid_part(key.rsplit("/", 1)[1], size, centre, tex)
+    return files
 
 
 def meshes() -> Dict[str, bytes]:
@@ -365,9 +548,25 @@ def build_esm() -> List[bytes]:
         obj("LIGH", "tw_lantern", "tw\\lantern.nif", "Lantern",
             extra=[esm.sub("LHDT", struct.pack("<fiiIII", 1.0, 5, -1, 384, 0x0060C0FF, 0x0008))]),
         obj("MISC", "tw_coin", "tw\\crate.nif", "Coin"),
+        esm.record("RACE", [esm.sub("NAME", esm.zs("tw_folk")), esm.sub("FNAM", esm.zs("Folk")),
+                            esm.sub("RADT", bytes(136) + struct.pack("<i", 1))]),
+        esm.record("CREA", [esm.sub("NAME", esm.zs("tw_critter")),
+                            esm.sub("MODL", esm.zs("tw\\critter.nif")),
+                            esm.sub("FNAM", esm.zs("Shore Critter"))]),
     ]
+    for bid, (part, female, key, _rigid) in PARTS.items():
+        recs.append(esm.record("BODY", [
+            esm.sub("NAME", esm.zs(bid)), esm.sub("MODL", esm.zs(key.replace("/", "\\") + ".nif")),
+            esm.sub("FNAM", esm.zs("tw_folk")),
+            esm.sub("BYDT", bytes((part, 0, 1 if female else 0, 0)))]))
+    for nid, name, female in (("tw_villager", "Hamlet Elder", False),
+                              ("tw_villager_f", "Hamlet Weaver", True)):
+        recs.append(esm.record("NPC_", [
+            esm.sub("NAME", esm.zs(nid)), esm.sub("FNAM", esm.zs(name)),
+            esm.sub("RNAM", esm.zs("tw_folk")), esm.sub("BNAM", esm.zs("tw_folk_head")),
+            esm.sub("NPDT", bytes(12)), esm.sub("FLAG", struct.pack("<i", 1 if female else 0))]))
     house_pos = (1200.0, 900.0, terrain_height(1200.0, 900.0))
-    door_out = (house_pos[0], house_pos[1] - 200.0, house_pos[2])
+    door_out = (house_pos[0], house_pos[1] - 206.0, house_pos[2])  # door sits at wall y - 6
     index = 1
     for (cx, cy) in EXTERIOR:
         subs = [esm.sub("NAME", esm.zs("Test Hamlet" if (cx, cy) == (0, 0) else "")),
@@ -395,6 +594,10 @@ def build_esm() -> List[bytes]:
             subs += ref_subs(index, "tw_crate", (house_pos[0] - 360, house_pos[1] - 240,
                                                  terrain_height(house_pos[0] - 360, house_pos[1] - 240)))
             index += 1
+            for nid, dx in (("tw_villager", 220.0), ("tw_villager_f", -220.0)):
+                px, py = house_pos[0] + dx, house_pos[1] - 520.0
+                subs += ref_subs(index, nid, (px, py, terrain_height(px, py)), (0.0, 0.0, math.pi))
+                index += 1
         recs.append(esm.record("CELL", subs))
         recs.append(land_record(cx, cy))
     cellar = [esm.sub("NAME", esm.zs(CELLAR)),
@@ -410,6 +613,8 @@ def build_esm() -> List[bytes]:
     index += 1
     cellar += ref_subs(index, "tw_lantern", (0.0, 0.0, 300.0))
     index += 1
+    cellar += ref_subs(index, "tw_critter", (-250.0, 150.0, 0.0), (0.0, 0.0, 2.2))
+    index += 1
     cellar += [esm.sub("NAM0", struct.pack("<I", 1))]
     cellar += ref_subs(index, "tw_coin", (-200.0, 250.0, 0.0))
     index += 1
@@ -423,6 +628,7 @@ def make(out_dir: str) -> str:
     files = {}
     files.update(textures())
     files.update(meshes())
+    files.update(actor_files())
     dmcommon.write_bsa(os.path.join(data_dir, "TestWorld.bsa"), files)
     esm.write_esm(os.path.join(data_dir, "TestWorld.esm"), build_esm())
     return data_dir

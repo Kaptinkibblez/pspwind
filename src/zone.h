@@ -15,6 +15,7 @@
 
 #include "common.h"
 #include "fmt.h"
+#include "anim.h"
 #include "pak.h"
 #include "texcache.h"
 #include "vfpu.h"
@@ -54,12 +55,17 @@ typedef struct {
     const DTexHeader *water_tex; /* NULL: untextured water */
     uint8_t *inst_scratch;       /* per-instance byte for the renderer (visibility) */
     uint8_t *terrain_scratch;    /* per-terrain-patch byte for the renderer */
+    const DZoneActor *actor_recs;
+    const uint32_t *anim_hashes;
+    Anim *anims;               /* loaded clips, anim_count entries (unbound if missing) */
     uint32_t mesh_bytes;
     uint32_t missing_meshes;
+    uint32_t missing_anims;
 } Zone;
 
 typedef struct {
     Pak zones, meshes, textures;
+    Pak anims;  /* optional: anims.dpak (handle 0 when absent) */
     const uint8_t *base;
     uint32_t size;
     const DWorldHeader *hdr;
@@ -70,7 +76,7 @@ typedef struct {
     TexCache tex;
 } World;
 
-/* data_dir holds zones.dpak, meshes.dpak, textures.dpak. */
+/* data_dir holds zones.dpak, meshes.dpak, textures.dpak (+ optional anims.dpak). */
 int world_open(World *w, const char *data_dir, char *err, uint32_t errlen);
 void world_close(World *w);
 uint32_t world_zone_count(const World *w);
@@ -84,7 +90,8 @@ int zone_load(World *w, Zone *z, uint32_t zi, char *err, uint32_t errlen);
 int zone_terrain_height(const Zone *z, float x, float y, float *h);
 /* Reasonable viewer start position (eye at pos) and yaw. */
 void zone_spawn_point(const Zone *z, Vec4 *pos, float *yaw);
-/* Mesh used by an instance (NULL when missing / merged into cell batches). */
+/* Static mesh of an instance (NULL when missing, merged into cell batches,
+ * or an actor - actors are drawn through actor.h). */
 const ZoneMesh *zone_instance_mesh(const Zone *z, uint32_t inst);
 /* Morrowind reference placement: T * Rx(-x) * Ry(-y) * Rz(-z) * S. */
 void zone_placement_matrix(Mat4 *out, const float pos[3], const float rot[3], float scale);

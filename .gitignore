@@ -7,6 +7,7 @@ EBOOT.PBP
 PARAM.SFO
 tests/host/host_tests
 tests/host/world_test
+tests/host/game_test
 
 # Python
 __pycache__/

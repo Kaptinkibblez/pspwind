@@ -286,7 +286,7 @@ typedef struct {
 /* All positions are world space (Morrowind units, +Z up).                  */
 /* ------------------------------------------------------------------------ */
 #define DZONE_MAGIC FMT_FOURCC('D', 'Z', 'O', 'N')
-#define DZONE_VERSION 1
+#define DZONE_VERSION 2
 #define DZONE_TERRAIN_GRID 17   /* vertices per patch side */
 #define DZONE_NONE 0xFFFFu
 #define DZONE_NO_ZONE 0xFFFFFFFFu
@@ -321,8 +321,37 @@ enum {
 enum {
     DZONE_IF_MERGED = 1 << 0,     /* geometry baked into cell batches; collision only */
     DZONE_IF_PERSISTENT = 1 << 1, /* persistent reference */
-    DZONE_IF_NO_MESH = 1 << 2     /* model missing / actor assembled at runtime */
+    DZONE_IF_NO_MESH = 1 << 2,    /* model missing */
+    DZONE_IF_ACTOR = 1 << 3       /* drawn through its DZoneActor record */
 };
+
+#define DZONE_ACTOR_MAX_PARTS 16
+
+enum {
+    DZONE_ACTOR_F_FEMALE = 1 << 0,
+    DZONE_ACTOR_F_BEAST = 1 << 1,
+    DZONE_ACTOR_F_CREATURE = 1 << 2
+};
+
+/*
+ * Animated actor (NPC or creature). The skeleton mesh supplies the bone
+ * hierarchy (and, for creatures, the segmented geometry). NPC body parts are
+ * separate meshes: their rigid-limb segments bind to skeleton bones by node
+ * name; unskinned parts attach to the bone named by part_bone[i]
+ * (pw_hash_name of e.g. "Head", "Right Hand"). part_flags bit 0 mirrors a
+ * left-side part across the bone's X axis.
+ */
+typedef struct {
+    uint32_t instance;
+    uint16_t skeleton;   /* zone mesh index */
+    uint16_t anim;       /* zone anim index or DZONE_NONE */
+    uint16_t flags;      /* DZONE_ACTOR_F_* */
+    uint16_t part_count;
+    uint16_t parts[DZONE_ACTOR_MAX_PARTS]; /* zone mesh indices */
+    uint32_t part_bone_ofs; /* uint32_t bone hash per part */
+    uint32_t part_flags;    /* bit i: part i mirrored (left side) */
+    uint32_t reserved[3];
+} DZoneActor;
 
 typedef struct {
     uint32_t magic; /* DZONE_MAGIC */
@@ -359,7 +388,10 @@ typedef struct {
     uint32_t strings_ofs;
     float bbox_min[3];
     float bbox_max[3];
-    uint32_t reserved[3];
+    uint16_t actor_count;
+    uint16_t anim_count;
+    uint32_t actors_ofs; /* DZoneActor[] */
+    uint32_t anims_ofs;  /* uint32_t anim hash[] (anims.dpak) */
 } DZoneHeader;
 
 typedef struct {
@@ -472,6 +504,53 @@ typedef struct {
     uint32_t zone;
 } DWorldInt;
 
+/* ------------------------------------------------------------------------ */
+/* DANIM - skeletal animation resampled at a fixed rate (anims.dpak entries */
+/* named after the .kf key, e.g. "xbase_anim", "r/xrat")                    */
+/* ------------------------------------------------------------------------ */
+#define DANIM_MAGIC FMT_FOURCC('D', 'A', 'N', 'M')
+#define DANIM_VERSION 1
+#define DANIM_QUAT_SCALE 32767.0f
+
+enum {
+    DANIM_T_ROT_ANIMATED = 1 << 0,   /* one rotation per frame, else one constant */
+    DANIM_T_TRANS_ANIMATED = 1 << 1, /* one translation per frame, else constant */
+    DANIM_T_HAS_ROT = 1 << 2,
+    DANIM_T_HAS_TRANS = 1 << 3
+};
+
+typedef struct {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t track_count;
+    uint16_t group_count;
+    uint16_t reserved0;
+    float fps;
+    uint32_t frame_count;
+    uint32_t tracks_ofs;  /* DAnimTrack[track_count] */
+    uint32_t groups_ofs;  /* DAnimGroup[group_count], sorted by name hash */
+    uint32_t strings_ofs;
+    uint32_t file_size;
+    uint32_t reserved[3];
+} DAnimHeader;
+
+typedef struct {
+    uint32_t bone_hash; /* pw_hash_name(node name) */
+    uint16_t flags;     /* DANIM_T_* */
+    uint16_t reserved;
+    uint32_t rot_ofs;   /* int16 x,y,z,w (/32767) per frame or one */
+    uint32_t trans_ofs; /* float x,y,z per frame or one */
+} DAnimTrack;
+
+typedef struct {
+    uint32_t name_hash; /* pw_hash_name(lower-case group, e.g. "walkforward") */
+    uint32_t name_ofs;
+    uint16_t start, stop;           /* frames, inclusive */
+    uint16_t loop_start, loop_stop; /* frames */
+    float speed;  /* root (Bip01) horizontal speed over the group, units/s */
+    uint32_t reserved;
+} DAnimGroup;
+
 /* Layout contract shared with the Python cookers. */
 PW_STATIC_ASSERT(sizeof(DPakHeader) == 32, dpak_header);
 PW_STATIC_ASSERT(sizeof(DPakEntry) == 16, dpak_entry);
@@ -497,5 +576,9 @@ PW_STATIC_ASSERT(sizeof(DWorldHeader) == 48, dworld_header);
 PW_STATIC_ASSERT(sizeof(DWorldZone) == 32, dworld_zone);
 PW_STATIC_ASSERT(sizeof(DWorldExt) == 8, dworld_ext);
 PW_STATIC_ASSERT(sizeof(DWorldInt) == 8, dworld_int);
+PW_STATIC_ASSERT(sizeof(DAnimHeader) == 48, danim_header);
+PW_STATIC_ASSERT(sizeof(DAnimTrack) == 16, danim_track);
+PW_STATIC_ASSERT(sizeof(DAnimGroup) == 24, danim_group);
+PW_STATIC_ASSERT(sizeof(DZoneActor) == 64, dzone_actor);
 
 #endif /* PSPWIND_FMT_H */

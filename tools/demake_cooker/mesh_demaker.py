@@ -412,7 +412,10 @@ class MeshBuilder:
 
         render_geoms = [g for g in self.geoms if not g.in_collision and
                         (self.cfg.keep_hidden or not g.hidden)]
-        skeletal = any(g.block.skin >= 0 for g in render_geoms)
+        # skinned geometry, or a bare Biped skeleton (base_anim.nif) that
+        # animations and body parts bind to by bone name
+        skeletal = any(g.block.skin >= 0 for g in render_geoms) or any(
+            b.name.lower().startswith("bip01") for b in self.node_blocks)
         bone_blocks: Set[int] = set()
         for g in render_geoms:
             skin = self.nif.get(g.block.skin)
@@ -554,7 +557,7 @@ class MeshBuilder:
 
         # ---- collision (model space)
         coll_tris = 0
-        if not skeletal and not self.no_collision:
+        if not mesh.flags & dmesh.DMESH_F_SKELETAL and not self.no_collision:
             cpos, ctri = self.collision_geometry(render_geoms)
             if ctri:
                 mesh.collision_positions = cpos

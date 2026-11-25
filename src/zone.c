@@ -160,6 +160,22 @@ int dzone_validate(const uint8_t *base, uint32_t size)
     for (i = 0; i < h->light_count; ++i)
         if (lights[i].instance >= h->instance_count)
             return 8;
+    if (!range_ok(h->anims_ofs, h->anim_count, 4, size, 4) ||
+        !range_ok(h->actors_ofs, h->actor_count, sizeof(DZoneActor), size, 16))
+        return 9;
+    {
+        const DZoneActor *act = (const DZoneActor *)(base + h->actors_ofs);
+        for (i = 0; i < h->actor_count; ++i) {
+            if (act[i].instance >= h->instance_count || act[i].skeleton >= h->mesh_count ||
+                (act[i].anim != DZONE_NONE && act[i].anim >= h->anim_count) ||
+                act[i].part_count > DZONE_ACTOR_MAX_PARTS ||
+                !range_ok(act[i].part_bone_ofs, act[i].part_count, 4, size, 4))
+                return 10;
+            for (k = 0; k < act[i].part_count; ++k)
+                if (act[i].parts[k] >= h->mesh_count)
+                    return 10;
+        }
+    }
     return 0;
 }
 
@@ -183,6 +199,12 @@ int world_open(World *w, const char *data_dir, char *err, uint32_t errlen)
         open_pak(&w->textures, data_dir, "textures.dpak", err, errlen)) {
         world_close(w);
         return -1;
+    }
+    {
+        char ignored[8];
+        /* animations are optional: actors stay in their bind pose without them */
+        if (open_pak(&w->anims, data_dir, "anims.dpak", ignored, sizeof(ignored)) != 0)
+            memset(&w->anims, 0, sizeof(w->anims));
     }
     w->base = (const uint8_t *)pak_load(&w->zones, pw_hash_name("world"), MEM_REGION_DB, 16,
                                         &w->size);
@@ -230,6 +252,7 @@ void world_close(World *w)
     pak_close(&w->zones);
     pak_close(&w->meshes);
     pak_close(&w->textures);
+    pak_close(&w->anims);
     w->hdr = NULL;
 }
 
@@ -423,6 +446,20 @@ int zone_load(World *w, Zone *z, uint32_t zi, char *err, uint32_t errlen)
         const DZoneInstance *in = &z->instances[i];
         zone_placement_matrix(&z->inst_world[i], in->pos, in->rot, in->scale);
     }
+    z->actor_recs = (const DZoneActor *)(z->base + h->actors_ofs);
+    z->anim_hashes = (const uint32_t *)(z->base + h->anims_ofs);
+    z->anims = (Anim *)mem_try_alloc(MEM_REGION_ZONE, (h->anim_count + 1u) * sizeof(Anim), 16);
+    if (!z->anims)
+        ZONE_FAIL("zone %u: out of zone memory for animations", (unsigned)zi);
+    memset(z->anims, 0, (h->anim_count + 1u) * sizeof(Anim));
+    for (i = 0; i < h->anim_count; ++i) {
+        uint32_t size = 0;
+        const uint8_t *blob = w->anims.handle
+            ? (const uint8_t *)pak_load(&w->anims, z->anim_hashes[i], MEM_REGION_ZONE, 16, &size)
+            : NULL;
+        if (!blob || anim_bind(&z->anims[i], blob, size) != 0)
+            z->missing_anims++;
+    }
     resolve_water(w, z);
 #if PW_PSP
     /* everything above was written through the data cache; the GE reads RAM */
@@ -434,7 +471,7 @@ int zone_load(World *w, Zone *z, uint32_t zi, char *err, uint32_t errlen)
 const ZoneMesh *zone_instance_mesh(const Zone *z, uint32_t inst)
 {
     const DZoneInstance *in = &z->instances[inst];
-    if (in->mesh == DZONE_NONE || (in->flags & DZONE_IF_MERGED))
+    if (in->mesh == DZONE_NONE || (in->flags & (DZONE_IF_MERGED | DZONE_IF_ACTOR)))
         return NULL;
     return z->meshes[in->mesh].hdr ? &z->meshes[in->mesh] : NULL;
 }

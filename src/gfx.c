@@ -98,14 +98,6 @@ void gfx_default_options(GfxOptions *o)
     o->near_radius = 1400.0f;
 }
 
-void gfx_camera_forward(const Camera *cam, Vec4 *fwd)
-{
-    float sy, cy, sp, cp;
-    pw_sincosf(cam->yaw, &sy, &cy);
-    pw_sincosf(cam->pitch, &sp, &cp);
-    *fwd = vec4(sy * cp, cy * cp, sp, 0.0f);
-}
-
 void gfx_begin_frame(uint32_t clear_abgr)
 {
     sceGuStart(GU_DIRECT, g_list);
@@ -245,6 +237,34 @@ static void draw_batch(const DMeshBatch *b, const uint8_t *base, const Mat4 *mod
                    base + b->vertex_ofs);
     g_stats->draws++;
     g_stats->triangles += b->index_count / 3u;
+}
+
+/* Mirrored (left-side) limbs flip handedness: draw them with the opposite
+ * front-face winding so back-face culling still removes the right faces. */
+static void draw_batch_mirrored(const DMeshBatch *b, const uint8_t *base, const Mat4 *model,
+                                const DTexHeader *tex, int lit, int mirrored, int cull_mode)
+{
+    if (mirrored)
+        sceGuFrontFace(cull_mode == GFX_CULL_CCW ? GU_CW : GU_CCW);
+    draw_batch(b, base, model, tex, lit);
+    if (mirrored)
+        sceGuFrontFace(cull_mode == GFX_CULL_CCW ? GU_CCW : GU_CW);
+}
+
+static void draw_actor_mesh(const Actor *a, int part, const ZoneMesh *m, int pass, int cull_mode)
+{
+    uint32_t k;
+    for (k = 0; k < m->hdr->batch_count; ++k) {
+        const DMeshBatch *b = &m->batches[k];
+        const DTexHeader *tex = b->texture != DMESH_NO_TEXTURE ? m->tex[b->texture] : NULL;
+        int bp = batch_pass(b->flags, tex), mirrored;
+        Mat4 model;
+        if (bp == 2)
+            bp = 1; /* actors: translucent bits drawn with the alpha-test pass */
+        if (bp != pass || !actor_batch_matrix(a, part, k, &model, &mirrored))
+            continue;
+        draw_batch_mirrored(b, m->base, &model, tex, 1, mirrored, cull_mode);
+    }
 }
 
 static void queue_blend(float dist, const DMeshBatch *b, const uint8_t *base, const Mat4 *world,
@@ -528,7 +548,8 @@ static int visible(const Frustum *f, const Camera *cam, const float b[4], float 
     return frustum_test_sphere(f, &c, b[3]) != CULL_OUTSIDE;
 }
 
-void gfx_draw_zone(const Zone *z, const Camera *cam, const GfxOptions *opt, GfxStats *stats)
+void gfx_draw_zone(const Zone *z, const ActorSet *actors, const Camera *cam,
+                   const GfxOptions *opt, GfxStats *stats)
 {
     const DZoneHeader *h = z->hdr;
     static Mat4 proj, view, vp, identity, model;
@@ -635,6 +656,32 @@ void gfx_draw_zone(const Zone *z, const Camera *cam, const GfxOptions *opt, GfxS
                     continue;
                 mat4_mul(&model, &z->inst_world[i], &m->batch_model[k]);
                 draw_batch(b, m->base, &model, tex, 1);
+            }
+        }
+        /* animated actors: one matrix per limb */
+        for (i = 0; actors && i < actors->count; ++i) {
+            const Actor *a = &actors->list[i];
+            float bnd[4], d;
+            uint32_t p;
+            if (!a->posed)
+                continue;
+            bnd[0] = a->pos.x;
+            bnd[1] = a->pos.y;
+            bnd[2] = a->pos.z + 64.0f * a->scale;
+            bnd[3] = 112.0f * a->scale;
+            if (!visible(&frustum, cam, bnd, fog_far, &d)) {
+                if (pass == 0)
+                    stats->culled++;
+                continue;
+            }
+            if (pass == 0)
+                stats->actors++;
+            if (a->rec->part_count == 0) {
+                draw_actor_mesh(a, -1, a->skel, (int)pass, opt->cull_mode);
+            } else {
+                for (p = 0; p < a->rec->part_count; ++p)
+                    if (a->part_mesh[p])
+                        draw_actor_mesh(a, (int)p, a->part_mesh[p], (int)pass, opt->cull_mode);
             }
         }
     }

@@ -2,6 +2,7 @@
 """cook_all - run the whole demake pipeline in dependency order.
 
     meshes  (mesh_demaker)  -> meshes.dpak + embedded textures in loose/
+    anims   (anim_demaker)  -> anims.dpak
     world   (world_demaker) -> zones.dpak (needs meshes.dpak for merging)
     textures(tex_demaker)   -> textures.dpak, limited to textures that the
                                meshes and zones reference (+ UI art, icons)
@@ -24,6 +25,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 import dmcommon  # noqa: E402
+import anim_demaker  # noqa: E402
 import mesh_demaker  # noqa: E402
 import tex_demaker  # noqa: E402
 import world_demaker  # noqa: E402
@@ -48,8 +50,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     rc = mesh_demaker.main(data_args + ["--out", args.out, "--ratio", str(args.ratio)] + common)
     if rc:
         return rc
+    rc = anim_demaker.main(data_args + ["--out", args.out] + common)
+    if rc:
+        return rc
     rc = world_demaker.main(data_args + ["--out", args.out, "--zone-size", str(args.zone_size),
-                                         "--meshes", os.path.join(args.out, "meshes.dpak")])
+                                         "--meshes", os.path.join(args.out, "meshes.dpak"),
+                                         "--anims", os.path.join(args.out, "anims.dpak")])
     if rc:
         return rc
     loose = os.path.join(args.out, "loose")

@@ -29,6 +29,8 @@ if HERE not in sys.path:
 import dmcommon  # noqa: E402
 import dmesh  # noqa: E402
 import dzone  # noqa: E402
+import actorpose  # noqa: E402
+import anim_demaker  # noqa: E402
 import tex_demaker  # noqa: E402
 import world_demaker  # noqa: E402
 
@@ -40,6 +42,8 @@ class Library:
         self.zones = dmcommon.DPakReader(dmcommon.read_file(os.path.join(data_dir, "zones.dpak")))
         self.meshes = dmcommon.DPakReader(dmcommon.read_file(os.path.join(data_dir, "meshes.dpak")))
         self.textures = dmcommon.DPakReader(dmcommon.read_file(os.path.join(data_dir, "textures.dpak")))
+        anims = os.path.join(data_dir, "anims.dpak")
+        self.anims = dmcommon.DPakReader(dmcommon.read_file(anims)) if os.path.exists(anims) else None
         self.tex_color: Dict[int, Tuple[float, float, float]] = {}
         self.mesh_lib = world_demaker.MeshLib(self.meshes)
 
@@ -87,20 +91,20 @@ def look_at(eye, yaw, pitch):
 
 
 def render(lib: Library, zone_entry: str, out: str, top: bool, eye=None, yaw=None,
-           pitch=None) -> dict:
+           pitch=None, group: str = "idle", seconds: float = 0.0) -> dict:
     z = dzone.read_zone(lib.zones.get(zone_entry))
     fog = z["fog_color"][:3]
     fog_near, fog_far = z["fog_near"], z["fog_far"]
     tris: List[Tuple[bool, List[Tuple[float, float, float]], Tuple[float, float, float]]] = []
 
     # gather world-space triangles with colours
-    def add_batch(b, tex_hash, xf):
+    def add_batch(b, tex_hash, xf, flip=False):
         base = tex_hash is not None and lib.texture_color(tex_hash) or (0.8, 0.8, 0.8)
         two_sided = bool(b["flags"] & dmesh.BATCH_F_DOUBLE_SIDED)
         vs = b["vertices"]
         idx = b["indices"]
         for k in range(0, len(idx), 3):
-            pts = [xf(vs[idx[k + m]]["pos"]) for m in range(3)]
+            pts = [xf(vs[idx[k + m]]["pos"]) for m in ((0, 2, 1) if flip else (0, 1, 2))]
             col = [sum(vs[idx[k + m]]["color"][c] for m in range(3)) / 3 for c in range(3)]
             tris.append((two_sided, pts, tuple(base[c] * col[c] for c in range(3))))
 
@@ -108,7 +112,7 @@ def render(lib: Library, zone_entry: str, out: str, top: bool, eye=None, yaw=Non
         th = z["textures"][b["texture"]]["hash"] if b["texture"] != dmesh.DMESH_NO_TEXTURE else None
         add_batch(b, th, lambda p: p)
     for ins in z["instances"]:
-        if ins["mesh"] == dzone.NONE16 or ins["flags"] & dzone.IF_MERGED:
+        if ins["mesh"] == dzone.NONE16 or ins["flags"] & (dzone.IF_MERGED | dzone.IF_ACTOR):
             continue
         name = lib.meshes.find_hash(z["meshes"][ins["mesh"]])
         dm = lib.mesh_lib.get(name) if name else None
@@ -119,6 +123,25 @@ def render(lib: Library, zone_entry: str, out: str, top: bool, eye=None, yaw=Non
             m = world_demaker._mmul(place, dm["node_worlds"][b["node"]])
             th = dm["textures"][b["texture"]]["hash"] if b["texture"] != dmesh.DMESH_NO_TEXTURE else None
             add_batch(b, th, lambda p, m=m: world_demaker._xf(m, p))
+
+    for act in z.get("actors", []):
+        ins = z["instances"][act["instance"]]
+        meshes = []
+        for h in z["meshes"]:
+            name = lib.meshes.find_hash(h)
+            meshes.append(lib.mesh_lib.get(name) if name else None)
+        if meshes[act["skeleton"]] is None:
+            continue
+        anim = None
+        if act["anim"] != dzone.NONE16 and lib.anims is not None:
+            aname = lib.anims.find_hash(z["anims"][act["anim"]])
+            anim = anim_demaker.read_danim(lib.anims.get(aname)) if aname else None
+        frame = actorpose.group_frame(anim, group, seconds) if anim else 0.0
+        place = world_demaker.placement_matrix(ins["pos"], ins["rot"], ins["scale"])
+        for dm, b, m, mirrored in actorpose.actor_batches(act, meshes, anim, frame):
+            full = actorpose.mmul(place, m)
+            th = dm["textures"][b["texture"]]["hash"] if b["texture"] != dmesh.DMESH_NO_TEXTURE else None
+            add_batch(b, th, lambda p, full=full: world_demaker._xf(full, p), mirrored)
 
     lo, hi = z["bbox_min"], z["bbox_max"]
     cx, cy = (lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2
@@ -191,10 +214,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--eye", type=float, nargs=3)
     ap.add_argument("--yaw", type=float, default=0.0, help="degrees, 0 = north")
     ap.add_argument("--pitch", type=float, default=-15.0, help="degrees")
+    ap.add_argument("--group", default="idle", help="animation group for actors")
+    ap.add_argument("--time", type=float, default=0.0, help="seconds into the group")
     args = ap.parse_args(argv)
     lib = Library(args.data)
     info = render(lib, args.zone, args.out, args.top, tuple(args.eye) if args.eye else None,
-                  math.radians(args.yaw), math.radians(args.pitch))
+                  math.radians(args.yaw), math.radians(args.pitch), args.group, args.time)
     print(f"{info['zone']}: {info['triangles']} triangles, {info['backfaces']} back faces culled "
           f"-> {args.out}")
     return 0

@@ -102,6 +102,11 @@ class ObjectDef:
     script: str = ""
     content: int = 0
     light: Optional[dict] = None  # LIGH: radius, color, flags, time
+    race: str = ""        # NPC_ RNAM / BODY FNAM
+    head: str = ""        # NPC_ BNAM (BODY id)
+    hair: str = ""        # NPC_ KNAM (BODY id)
+    npc_flags: int = 0    # NPC_ FLAG (bit 0 = female)
+    body: Optional[Tuple[int, int, int, int]] = None  # BODY BYDT: part, vampire, flags, type
 
 
 @dataclass
@@ -226,6 +231,7 @@ class World:
         self.lands: Dict[Tuple[int, int], Land] = {}
         self.ltex: Dict[Tuple[int, int], str] = {}  # (content, index) -> texture path
         self.regions: Dict[str, dict] = {}
+        self.races: Dict[str, dict] = {}
         self.warnings: List[str] = []
 
     # ------------------------------------------------------------ loading
@@ -271,6 +277,8 @@ class World:
                 self._load_ltex(rec, content)
             elif t == "REGN":
                 self._load_region(rec)
+            elif t == "RACE":
+                self._load_race(rec)
 
     def _load_object(self, rec: Record, content: int) -> None:
         name = rec.get("NAME")
@@ -285,10 +293,22 @@ class World:
         for n, d in rec.subs:
             if n == "MODL":
                 obj.model = zstr(d)
-            elif n == "FNAM":
+            elif n == "FNAM" and rec.type != "BODY":
                 obj.name = zstr(d)
             elif n == "SCRI":
                 obj.script = zstr(d)
+            elif n == "RNAM":
+                obj.race = zstr(d)
+            elif n == "BNAM" and rec.type == "NPC_":
+                obj.head = zstr(d)
+            elif n == "KNAM" and rec.type == "NPC_":
+                obj.hair = zstr(d)
+            elif n == "FLAG" and rec.type == "NPC_" and len(d) >= 4:
+                obj.npc_flags = struct.unpack_from("<i", d, 0)[0] & 0xFF
+            elif n == "BYDT" and len(d) >= 4:
+                obj.body = tuple(d[:4])  # type: ignore[assignment]
+            elif n == "FNAM" and rec.type == "BODY":
+                obj.race = zstr(d)
             elif n == "LHDT" and len(d) >= 24:
                 weight, value, time, radius, color, flags = struct.unpack_from("<fiiIII", d, 0)
                 obj.light = {"radius": radius, "color": color, "flags": flags, "time": time}
@@ -311,6 +331,16 @@ class World:
         if cnam and len(cnam) >= 4:
             (reg["color"],) = struct.unpack_from("<I", cnam, 0)
         self.regions[reg["id"].lower()] = reg
+
+    def _load_race(self, rec: Record) -> None:
+        name = rec.get("NAME")
+        if name is None:
+            return
+        race = {"id": zstr(name), "name": zstr(rec.get("FNAM") or b""), "flags": 0}
+        radt = rec.get("RADT")
+        if radt is not None and len(radt) >= 140:
+            (race["flags"],) = struct.unpack_from("<i", radt, 136)  # 1 playable, 2 beast
+        self.races[race["id"].lower()] = race
 
     def _load_land(self, rec: Record, content: int) -> None:
         intv = rec.get("INTV")

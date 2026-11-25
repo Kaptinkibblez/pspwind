@@ -39,6 +39,8 @@ static void check_zone(World *w, Zone *z, uint32_t zi)
         Vec4 c, wc;
         if (in->mesh == DZONE_NONE || !z->meshes[in->mesh].hdr)
             continue;
+        if ((in->flags & DZONE_IF_ACTOR) && in->kind == DZONE_INST_NPC)
+            continue; /* NPC bounds are a standing figure, not the bare skeleton's */
         m = &z->meshes[in->mesh];
         c = vec4(m->hdr->bound_center[0], m->hdr->bound_center[1], m->hdr->bound_center[2], 1.0f);
         mat4_transform_point(&wc, &z->inst_world[i], &c);

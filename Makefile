@@ -11,7 +11,7 @@
 
 TARGET    = pspwind
 OBJS      = src/main.o src/mem.o src/vfpu.o src/selftest.o src/pak.o src/texcache.o \
-            src/zone.o src/gfx.o
+            src/zone.o src/gfx.o src/anim.o src/actor.o src/phys.o src/game.o
 
 INCDIR    = src
 CFLAGS    = -std=c99 -O2 -G0 -Wall -Wextra -Werror -fno-strict-aliasing

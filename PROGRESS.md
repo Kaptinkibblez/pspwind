@@ -3,11 +3,85 @@
 | Milestone | Scope | Status |
 |---|---|---|
 | 1 | Scaffold, Makefile, 32 MB arena (`mem.c`), VFPU math (`vfpu.c`), `tex_demaker.py`, `mesh_demaker.py` | Done |
-| 2 | `world_demaker.py` (17×17 terrain, batched cells) + `zone.c` + fogged `sceGu` renderer (`gfx.c`) | **Done – awaiting review** |
-| 3 | `phys.c` collision, controls, doors/zone transitions, segmented-limb animation | Not started |
+| 2 | `world_demaker.py` (17×17 terrain, batched cells) + `zone.c` + fogged `sceGu` renderer (`gfx.c`) | Done |
+| 3 | `phys.c` collision, controls, doors/zone transitions, segmented-limb animation | **Done – awaiting review** |
 | 4 | `rpg_compiler.py`, MWScript VM (`vm.c`), dialogue + journal UI (`ui.c`) | Not started |
 | 5 | Combat, magic, inventory/barter/loot UI, character creation, levelling (`rpg.c`) | Not started |
 | 6 | AI (`ai.c`), audio mixer (`audio.c`), save/load (`save.c`), 30/60 FPS pass | Not started |
+
+## Milestone 3 — delivered
+
+### Cooker
+* `anim_demaker.py` — `.kf` → DANIM: text keys → named groups (Start/Stop/
+  Loop Start/Loop Stop, CR LF separated), controllers paired with the
+  `NiStringExtraData` bone names (OpenMW `loadKf` order), resampled at
+  15 fps (quaternion slerp; XYZ euler keys composed x→y→z as in OpenMW
+  `getXYZRotation`), constant tracks stored once, int16 quaternions.
+  `Bip01` horizontal root motion is stripped and stored as group speed.
+* `mesh_demaker.py` keeps whole Biped hierarchies (`Bip01*` nodes), so bare
+  skeletons such as `base_anim.nif` survive cooking.
+* `world_demaker.py` assembles actors: NPC skeleton (`base_anim`,
+  `base_anim_female`, `base_animkna` for beast races), race skin BODY parts
+  by sex (female → male fallback), head/hair from the NPC record, rigid parts
+  attached to MW attachment bones ("Head", "Right Hand", …; left side
+  mirrored), skinned parts bound by bone name; creatures use the
+  `x`-prefixed model + `.kf` (OpenMW `correctActorModelPath`). DZONE v2 adds
+  actor and animation tables.
+* `actorpose.py` — Python reference of the runtime posing; the preview tool
+  now renders posed actors (`--group walkforward --time 0.25`).
+* `make_testworld.py` — adds an original Biped skeleton, a race with
+  skinned + rigid body parts, Idle/WalkForward clips, two villagers and a
+  creature.
+
+### Runtime
+* `anim.c` — validated DANIM, binary-searched groups, looping playback,
+  nlerp sampling.
+* `actor.c` — bone↔track, part-node↔bone and part↔attachment bindings at
+  zone load; per-frame posing of actors within 3000 units (one VFPU
+  `mat4_mul` per bone); limb matrix = actor × bone × [mirror] × dequant.
+* `phys.c` — static collision from every instance's DMESH collision
+  (merged statics included) in a 256-unit CSR grid; swinging doors as
+  dynamic triangles; terrain triangles built on demand from the 17×17
+  patches; actors as cylinder obstacles. Movement: vertical cylinder vs
+  triangle (clip to the slab [feet + 34, head], push out of the 2D
+  footprint) so steps ≤ 34 units and slopes ≤ ~46° are walkable; gravity
+  627.2, jump, step-down snap 62, ceilings, swimming with buoyancy,
+  steep-slope sliding (OpenMW constants). Rays for activation.
+* `game.c` — portable gameplay layer: two PSP control schemes (stick moves
+  + face buttons look, or the reverse), run/walk, sneak, jump, debug fly,
+  activation ray (192 units, occlusion-checked), teleport doors (lock
+  check, destination zone + position), swinging doors, exterior border
+  transitions, NPCs turning to face the player, debug animation cycling.
+* `gfx.c` draws actors (mirrored limbs with flipped winding).
+* `main.c` — pause menu (control scheme, invert look, face culling,
+  overlay, quit), HUD (crosshair, activation prompt with door destination,
+  messages), loading cards on zone requests.
+
+### Verification run
+* `make` → `EBOOT.PBP` (335 KB), zero warnings under `-Werror`.
+* `make test`: 102 host checks; 72 cooker tests (adds KF parsing,
+  resampling, XYZ-euler order, looping, root-motion stripping, NPC/creature
+  assembly, posed NPC stands with feet at z 0 and head top at 158);
+  world loader + fuzzing; **game test 40/40** — the real C gameplay code
+  driven by scripted input on the test world: rests on terrain, walks north
+  and stops at the door, the prompt names the cellar, R loads the cellar,
+  stands on its floor, the wall stops it, a jump peaks at ~103 units and
+  lands, the creature's tail animates, the cellar door leads back, the
+  villager's idle head sits at 136 and its walk swings the arms with root
+  motion stripped, all 13 body-part batches bind (left side mirrored),
+  the villager turns to face the player and blocks movement, crossing x = 0
+  loads the western zone, deep water makes the player swim at the surface.
+* The tests caught and fixed two real bugs before commit: ground support
+  hovering 2 units above sloped terrain, and root motion not being stripped.
+* Software previews of posed actors: `docs/img/`.
+
+### Still not verified
+1. Nothing has run on a PSP or in PPSSPP (same permission block as before).
+   On first run check: face culling (pause menu), sun direction, mirrored
+   limbs, fps.
+2. Retail data untested. Body-part mirroring for rigid left-side parts and
+   the female skeleton fallback follow OpenMW's part list but could not be
+   checked against the real assets.
 
 ## Milestone 2 — delivered
 

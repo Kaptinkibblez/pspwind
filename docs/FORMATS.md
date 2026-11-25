@@ -101,3 +101,26 @@ Placement follows OpenMW: `world = T(pos) · Rx(−rx) · Ry(−ry) · Rz(−rz)
 `--merge-max-tris` triangles are pre-transformed into the cell batches and
 keep an instance flagged `DZONE_IF_MERGED` (collision only). If merging
 pushes a zone over its memory budget the cooker rebuilds it instanced.
+
+## DANIM — animation clip (`anims.dpak`, entry = `.kf` key)
+
+Header (fps, frame count), tracks `{bone name hash, flags, rotation
+offset, translation offset}` and groups `{name hash, start, stop, loop
+start, loop stop, root speed}` sorted by hash. Rotations are int16
+quaternions (x, y, z, w ÷ 32767), translations floats; a track stores one
+value per frame when animated, otherwise a single constant. Sampling is a
+frame lookup plus nlerp/lerp between neighbouring frames. The accumulation
+root (`Bip01`) keeps only its vertical motion; its horizontal travel per
+group is stored as the group speed (units/s).
+
+## Actors in DZONE (version 2)
+
+`DZoneActor` records reference an instance (flagged `DZONE_IF_ACTOR`), a
+skeleton mesh, an animation clip and up to 16 body-part meshes with an
+attachment-bone hash each (0 for skinned parts, whose rigid-limb segments
+bind to skeleton bones by node name) and a mirror bit for left-side parts.
+NPCs use `base_anim` (`base_anim_female`, `base_animkna` for beast races)
+with the `x`-prefixed `.kf`; race skin parts are chosen by race and sex
+(female NPCs fall back to male parts), head and hair come from the NPC
+record. Creatures use the `x`-prefixed variant of their model and `.kf`
+when present.

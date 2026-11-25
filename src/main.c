@@ -1,18 +1,11 @@
 /*
- * main.c - boot + Milestone 2 zone viewer.
+ * main.c - boot, PSP input and the frame loop.
  *
- * Boot: arena init and the allocator / VFPU self-tests (VFPU results are
- * checked against the scalar oracle on the real CPU). Then, if cooked data
- * is present in <eboot dir>/data, a free-fly viewer over the zones:
- *
- *   analog       move / strafe          D-pad   turn / look up-down
- *   R / L        fly up / down          X       use door (debug teleport)
- *   TRIANGLE     next zone              SQUARE  previous zone
- *   CIRCLE       toggle overlay         SELECT  cycle face culling CW/CCW/off
- *   START        quit
- *
- * Walking past the edge of an exterior zone loads the neighbouring zone
- * behind a loading card (discrete zones instead of open-world streaming).
+ * Boot runs the allocator / VFPU self-tests, then (with cooked data in
+ * <eboot dir>/data) starts first-person exploration (game.c). Gameplay is
+ * platform independent; this file only turns the pad into InputState,
+ * shows loading cards when the game requests a zone change, draws the HUD
+ * and runs the pause menu (START).
  */
 #include <pspctrl.h>
 #include <pspdebug.h>
@@ -27,12 +20,13 @@
 #include <string.h>
 
 #include "fmt.h"
+#include "game.h"
 #include "gfx.h"
 #include "mem.h"
 #include "selftest.h"
 #include "zone.h"
 
-PSP_MODULE_INFO("pspwind", PSP_MODULE_USER, 0, 2);
+PSP_MODULE_INFO("pspwind", PSP_MODULE_USER, 0, 3);
 /* VFPU attribute is mandatory: without it VFPU state is not preserved. */
 PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER | PSP_THREAD_ATTR_VFPU);
 /* newlib heap is kept tiny on purpose: the game never mallocs. */
@@ -98,7 +92,7 @@ static uint32_t wait_buttons(uint32_t mask)
     SceCtrlData pad;
     do {
         sceCtrlReadBufferPositive(&pad, 1);
-    } while ((pad.Buttons & mask) && g_running); /* release first */
+    } while ((pad.Buttons & mask) && g_running);
     for (;;) {
         sceCtrlReadBufferPositive(&pad, 1);
         if ((pad.Buttons & mask) || !g_running)
@@ -128,115 +122,180 @@ static int run_selftests(void)
 }
 
 /* ------------------------------------------------------------------------ */
-/* viewer                                                                   */
+/* app state                                                                */
 /* ------------------------------------------------------------------------ */
+enum { MENU_RESUME, MENU_SCHEME, MENU_INVERT, MENU_CULL, MENU_OVERLAY, MENU_QUIT, MENU_COUNT };
+
 typedef struct {
     World world;
-    Zone zone;
-    Camera cam;
+    Game game;
     GfxOptions opt;
     GfxStats stats;
-    int show_overlay;
+    int overlay;
+    int paused;
+    int menu;
     int selftest_ok;
     float fps;
-    char msg[96];
-} Viewer;
+    char error[120];
+} App;
 
-static Viewer g_v;
+static App g_app;
 
-static void overlay(void *user)
+static void hud(void *user)
 {
-    Viewer *v = (Viewer *)user;
-    MemStats zs;
+    App *a = (App *)user;
+    const Game *g = &a->game;
+    const char *label = game_target_label(g);
     static const char *cull_names[] = { "CW", "CCW", "off" };
-    if (!v->show_overlay)
-        return;
-    mem_stats(MEM_REGION_ZONE, &zs);
     pspDebugScreenEnableBackColor(0);
     pspDebugScreenSetTextColor(0xFFFFFFFF);
-    pspDebugScreenSetXY(0, 0);
-    pspDebugScreenPrintf("%-36.36s %4.1f fps", v->zone.name, v->fps);
-    pspDebugScreenSetXY(0, 1);
-    pspDebugScreenPrintf("pos %7.0f %7.0f %6.0f  cell %d,%d",
-                         v->cam.pos.x, v->cam.pos.y, v->cam.pos.z,
-                         (int)floorf(v->cam.pos.x / 8192.0f), (int)floorf(v->cam.pos.y / 8192.0f));
-    pspDebugScreenSetXY(0, 2);
-    pspDebugScreenPrintf("draw %4u tri %6u cull %4u tex %3u near %3u dl %3uK",
-                         (unsigned)v->stats.draws, (unsigned)v->stats.triangles,
-                         (unsigned)v->stats.culled, (unsigned)v->stats.tex_binds,
-                         (unsigned)v->stats.near_quads, (unsigned)(v->stats.list_bytes >> 10));
-    pspDebugScreenSetXY(0, 3);
-    pspDebugScreenPrintf("zone mem %4uK/%uK  tex %4uK  cull %s%s",
-                         (unsigned)((zs.used_lo + zs.used_hi) >> 10), (unsigned)(zs.size >> 10),
-                         (unsigned)(texcache_bytes_used(&v->world.tex) >> 10),
-                         cull_names[v->opt.cull_mode], v->selftest_ok ? "" : "  SELFTEST FAIL");
-    if (v->msg[0]) {
-        pspDebugScreenSetXY(0, 33);
-        pspDebugScreenPrintf("%s", v->msg);
+    pspDebugScreenSetXY(29, 16);
+    pspDebugScreenPrintf("+");
+    if (label && !a->paused) {
+        pspDebugScreenSetTextColor(0xFF80E0FF);
+        pspDebugScreenSetXY(34 - (int)(strlen(label) + 4) / 2, 19);
+        pspDebugScreenPrintf("[R] %.40s", label);
+    }
+    if (g->message_time > 0.0f) {
+        pspDebugScreenSetTextColor(0xFFC0F0C0);
+        pspDebugScreenSetXY(1, 31);
+        pspDebugScreenPrintf("%.66s", g->message);
+    }
+    if (a->error[0]) {
+        pspDebugScreenSetTextColor(0xFF4060FF);
+        pspDebugScreenSetXY(1, 32);
+        pspDebugScreenPrintf("%.66s", a->error);
+    }
+    if (a->overlay) {
+        MemStats zs;
+        mem_stats(MEM_REGION_ZONE, &zs);
+        pspDebugScreenSetTextColor(0xFFFFFFFF);
+        pspDebugScreenSetXY(0, 0);
+        pspDebugScreenPrintf("%-34.34s %4.1f fps %s%s", g->zone.name, a->fps,
+                             g->flying ? "FLY " : "", g->body.swimming ? "SWIM" : "");
+        pspDebugScreenSetXY(0, 1);
+        pspDebugScreenPrintf("pos %7.0f %7.0f %6.0f %s%s  tests %u",
+                             g->body.pos.x, g->body.pos.y, g->body.pos.z,
+                             g->body.on_ground ? "ground" : "air",
+                             g->body.steep ? " steep" : "", (unsigned)g->phys.tests);
+        pspDebugScreenSetXY(0, 2);
+        pspDebugScreenPrintf("draw %4u tri %6u cull %4u tex %3u actors %2u dl %3uK",
+                             (unsigned)a->stats.draws, (unsigned)a->stats.triangles,
+                             (unsigned)a->stats.culled, (unsigned)a->stats.tex_binds,
+                             (unsigned)a->stats.actors, (unsigned)(a->stats.list_bytes >> 10));
+        pspDebugScreenSetXY(0, 3);
+        pspDebugScreenPrintf("zone %4uK/%uK tex %4uK coll %u tris cull %s%s",
+                             (unsigned)((zs.used_lo + zs.used_hi) >> 10), (unsigned)(zs.size >> 10),
+                             (unsigned)(texcache_bytes_used(&a->world.tex) >> 10),
+                             (unsigned)g->phys.tri_count, cull_names[a->opt.cull_mode],
+                             a->selftest_ok ? "" : " SELFTEST FAIL");
+    }
+    if (a->paused) {
+        static const char *items[MENU_COUNT] = { "Resume", "Controls", "Invert look", "Face culling",
+                                                 "Debug overlay", "Quit" };
+        int i;
+        pspDebugScreenSetTextColor(0xFFFFFFFF);
+        pspDebugScreenSetXY(26, 9);
+        pspDebugScreenPrintf("-- Paused --");
+        for (i = 0; i < MENU_COUNT; ++i) {
+            char value[24] = "";
+            if (i == MENU_SCHEME)
+                snprintf(value, sizeof(value), "%s", g->controls.scheme == CONTROL_SCHEME_A
+                                                         ? "A: stick moves" : "B: stick looks");
+            else if (i == MENU_INVERT)
+                snprintf(value, sizeof(value), "%s", g->controls.invert_y ? "on" : "off");
+            else if (i == MENU_CULL)
+                snprintf(value, sizeof(value), "%s", cull_names[a->opt.cull_mode]);
+            else if (i == MENU_OVERLAY)
+                snprintf(value, sizeof(value), "%s", a->overlay ? "on" : "off");
+            pspDebugScreenSetTextColor(i == a->menu ? 0xFF40E0FF : 0xFFB0B0B0);
+            pspDebugScreenSetXY(20, 11 + i);
+            pspDebugScreenPrintf("%c %-14s %s", i == a->menu ? '>' : ' ', items[i], value);
+        }
     }
 }
 
-static int enter_zone(Viewer *v, uint32_t zi, const float *pos, const float *rot)
+static int enter_zone(App *a, uint32_t zone, const float *pos, const float *rot)
 {
-    char err[160];
-    const char *name = world_zone_name(&v->world, zi);
-    gfx_loading_screen(name, "", 0xFF101418);
-    if (zone_load(&v->world, &v->zone, zi, err, sizeof(err)) != 0) {
-        snprintf(v->msg, sizeof(v->msg), "load failed: %.80s", err);
+    char err[120];
+    gfx_loading_screen(world_zone_name(&a->world, zone), "", 0xFF101418);
+    if (game_enter_zone(&a->game, zone, pos, rot, err, sizeof(err)) != 0) {
+        snprintf(a->error, sizeof(a->error), "zone load failed: %.90s", err);
         return -1;
     }
-    if (pos) {
-        float ground;
-        v->cam.pos = vec4(pos[0], pos[1], pos[2] + 128.0f, 1.0f);
-        if (zone_terrain_height(&v->zone, pos[0], pos[1], &ground) && v->cam.pos.z < ground + 64.0f)
-            v->cam.pos.z = ground + 128.0f;
-        /* Morrowind z rotation is clockwise from north */
-        v->cam.yaw = rot ? rot[2] : v->cam.yaw;
-    } else {
-        zone_spawn_point(&v->zone, &v->cam.pos, &v->cam.yaw);
-    }
-    v->cam.pitch = 0.0f;
-    snprintf(v->msg, sizeof(v->msg), "%s%s", v->zone.missing_meshes ? "some meshes missing" : "",
-             v->world.tex.misses ? "  some textures missing" : "");
+    a->error[0] = '\0';
+    if (a->game.zone.missing_meshes || a->world.tex.misses || a->game.zone.missing_anims)
+        snprintf(a->error, sizeof(a->error), "missing: %u meshes, %u textures, %u anims",
+                 (unsigned)a->game.zone.missing_meshes, (unsigned)a->world.tex.misses,
+                 (unsigned)a->game.zone.missing_anims);
     return 0;
 }
 
-static void try_door(Viewer *v)
+static uint32_t map_buttons(uint32_t b)
 {
-    const DZoneHeader *h = v->zone.hdr;
-    uint32_t i;
-    for (i = 0; i < h->door_count; ++i) {
-        const DZoneDoor *d = &v->zone.doors[i];
-        const DZoneInstance *in = &v->zone.instances[d->instance];
-        float dx = in->pos[0] - v->cam.pos.x, dy = in->pos[1] - v->cam.pos.y;
-        if (dx * dx + dy * dy < 250.0f * 250.0f && d->dest_zone != DZONE_NO_ZONE) {
-            float pos[3], rot[3];
-            memcpy(pos, d->dest_pos, sizeof(pos));
-            memcpy(rot, d->dest_rot, sizeof(rot));
-            enter_zone(v, d->dest_zone, pos, rot);
-            return;
-        }
-    }
-    snprintf(v->msg, sizeof(v->msg), "no door within reach");
+    uint32_t out = 0;
+    if (b & PSP_CTRL_UP) out |= GB_UP;
+    if (b & PSP_CTRL_DOWN) out |= GB_DOWN;
+    if (b & PSP_CTRL_LEFT) out |= GB_LEFT;
+    if (b & PSP_CTRL_RIGHT) out |= GB_RIGHT;
+    if (b & PSP_CTRL_TRIANGLE) out |= GB_TRIANGLE;
+    if (b & PSP_CTRL_CROSS) out |= GB_CROSS;
+    if (b & PSP_CTRL_SQUARE) out |= GB_SQUARE;
+    if (b & PSP_CTRL_CIRCLE) out |= GB_CIRCLE;
+    if (b & PSP_CTRL_LTRIGGER) out |= GB_L;
+    if (b & PSP_CTRL_RTRIGGER) out |= GB_R;
+    if (b & PSP_CTRL_START) out |= GB_START;
+    if (b & PSP_CTRL_SELECT) out |= GB_SELECT;
+    return out;
 }
 
-static void check_border(Viewer *v)
+static float stick(unsigned char v, int invert)
 {
-    const DZoneHeader *h = v->zone.hdr;
-    int cx = (int)floorf(v->cam.pos.x / 8192.0f), cy = (int)floorf(v->cam.pos.y / 8192.0f);
-    int zi;
-    float pos[3];
-    if (h->kind != DZONE_KIND_EXTERIOR)
-        return;
-    if (cx >= h->cell_x0 && cx <= h->cell_x1 && cy >= h->cell_y0 && cy <= h->cell_y1)
-        return;
-    zi = world_find_exterior(&v->world, cx, cy);
-    if (zi < 0 || (uint32_t)zi == v->zone.index)
-        return;
-    pos[0] = v->cam.pos.x;
-    pos[1] = v->cam.pos.y;
-    pos[2] = v->cam.pos.z - 128.0f;
-    enter_zone(v, (uint32_t)zi, pos, NULL);
+    float f = ((float)v - 128.0f) / 127.0f;
+    if (invert)
+        f = -f;
+    if (fabsf(f) < 0.2f)
+        return 0.0f;
+    /* rescale outside the dead zone so small pushes still start slow */
+    f = (f > 0.0f ? f - 0.2f : f + 0.2f) / 0.8f;
+    return f > 1.0f ? 1.0f : (f < -1.0f ? -1.0f : f);
+}
+
+/* Returns 0 to keep running, 1 to quit. */
+static int pause_menu(App *a, const InputState *in)
+{
+    Game *g = &a->game;
+    if (in->pressed & GB_UP)
+        a->menu = (a->menu + MENU_COUNT - 1) % MENU_COUNT;
+    if (in->pressed & GB_DOWN)
+        a->menu = (a->menu + 1) % MENU_COUNT;
+    if (in->pressed & (GB_CROSS | GB_R | GB_LEFT | GB_RIGHT)) {
+        switch (a->menu) {
+        case MENU_RESUME:
+            a->paused = 0;
+            break;
+        case MENU_SCHEME:
+            g->controls.scheme = g->controls.scheme == CONTROL_SCHEME_A ? CONTROL_SCHEME_B
+                                                                         : CONTROL_SCHEME_A;
+            break;
+        case MENU_INVERT:
+            g->controls.invert_y = !g->controls.invert_y;
+            break;
+        case MENU_CULL:
+            a->opt.cull_mode = (a->opt.cull_mode + 1) % 3;
+            break;
+        case MENU_OVERLAY:
+            a->overlay = !a->overlay;
+            break;
+        case MENU_QUIT:
+            return 1;
+        default:
+            break;
+        }
+    }
+    if (in->pressed & (GB_START | GB_CIRCLE))
+        a->paused = 0;
+    return 0;
 }
 
 static void data_dir_from_argv(char *out, size_t n, int argc, char **argv)
@@ -252,110 +311,89 @@ static void data_dir_from_argv(char *out, size_t n, int argc, char **argv)
     }
 }
 
-static void run_viewer(Viewer *v, const char *data_dir)
+static void run(App *a, const char *data_dir)
 {
     char err[200];
     SceCtrlData pad;
     uint32_t prev = 0;
-    uint64_t last = clock_us(), fps_t0 = last;
+    uint64_t last, fps_t0;
     int frames = 0, zi;
 
-    if (world_open(&v->world, data_dir, err, sizeof(err)) != 0) {
+    if (world_open(&a->world, data_dir, err, sizeof(err)) != 0) {
         pspDebugScreenSetTextColor(0xFF4080FF);
         log_printf("\nNo cooked world: %s\n", err);
         pspDebugScreenSetTextColor(0xFFFFFFFF);
-        log_printf("Cook one with tools/demake_cooker/cook_all.py and copy\n"
-                   "meshes.dpak, textures.dpak, zones.dpak to %s\n\nPress START to exit.\n",
-                   data_dir);
+        log_printf("Cook one with tools/demake_cooker/cook_all.py and copy the .dpak\n"
+                   "files to %s\n\nPress START to exit.\n", data_dir);
         wait_buttons(PSP_CTRL_START);
         return;
     }
-    log_printf("\nWorld: %u zones. Press X to enter the viewer.\n",
-               (unsigned)world_zone_count(&v->world));
+    log_printf("\nWorld: %u zones%s. Press X to start.\n", (unsigned)world_zone_count(&a->world),
+               a->world.anims.handle ? "" : " (no anims.dpak: actors stay in bind pose)");
     wait_buttons(PSP_CTRL_CROSS | PSP_CTRL_START);
 
     gfx_init();
-    gfx_default_options(&v->opt);
-    v->cam.fov_y = 60.0f * PW_DEG2RAD;
-    v->show_overlay = 1;
-    zi = world_find_exterior(&v->world, -2, -9); /* Seyda Neen when cooked from retail data */
+    gfx_default_options(&a->opt);
+    game_init(&a->game, &a->world);
+    zi = world_find_exterior(&a->world, -2, -9); /* Seyda Neen with retail data */
     if (zi < 0)
-        zi = world_find_exterior(&v->world, 0, 0);
+        zi = world_find_exterior(&a->world, 0, 0);
     if (zi < 0)
         zi = 0;
-    if (enter_zone(v, (uint32_t)zi, NULL, NULL) != 0 && world_zone_count(&v->world) > 1)
-        enter_zone(v, 1, NULL, NULL);
+    if (enter_zone(a, (uint32_t)zi, NULL, NULL) != 0 && world_zone_count(&a->world) > 1)
+        enter_zone(a, 1, NULL, NULL);
 
     sceCtrlSetSamplingCycle(0);
     sceCtrlSetSamplingMode(PSP_CTRL_MODE_ANALOG);
+    last = fps_t0 = clock_us();
     while (g_running) {
         uint64_t now = clock_us();
-        float dt = (float)(now - last) * 1e-6f, ax, ay, speed = 700.0f;
-        uint32_t pressed;
-        Vec4 fwd, right;
+        float dt = (float)(now - last) * 1e-6f;
+        InputState in;
+        Camera cam;
+        uint32_t held;
         last = now;
         if (dt > 0.1f)
-            dt = 0.1f;
+            dt = 0.1f; /* long frames (loading) must not launch the player */
         sceCtrlReadBufferPositive(&pad, 1);
-        pressed = pad.Buttons & ~prev;
-        prev = pad.Buttons;
-        if (pressed & PSP_CTRL_START)
-            break;
+        held = map_buttons(pad.Buttons);
+        in.held = held;
+        in.pressed = held & ~prev;
+        prev = held;
+        in.ax = stick(pad.Lx, 0);
+        in.ay = stick(pad.Ly, 1);
 
-        if (v->zone.hdr) {
-            if (pressed & PSP_CTRL_TRIANGLE)
-                enter_zone(v, (v->zone.index + 1) % world_zone_count(&v->world), NULL, NULL);
-            else if (pressed & PSP_CTRL_SQUARE)
-                enter_zone(v, (v->zone.index + world_zone_count(&v->world) - 1) %
-                                  world_zone_count(&v->world), NULL, NULL);
-            else if (pressed & PSP_CTRL_CROSS)
-                try_door(v);
+        if (a->paused) {
+            if (pause_menu(a, &in))
+                break;
+        } else if (in.pressed & GB_START) {
+            a->paused = 1;
+            a->menu = MENU_RESUME;
+        } else if (a->game.zone.hdr) {
+            game_update(&a->game, &in, dt);
+            if (a->game.request.pending) {
+                ZoneRequest r = a->game.request;
+                enter_zone(a, r.zone, r.has_pos ? r.pos : NULL, r.has_pos ? r.rot : NULL);
+                last = clock_us();
+            }
         }
-        if (pressed & PSP_CTRL_CIRCLE)
-            v->show_overlay = !v->show_overlay;
-        if (pressed & PSP_CTRL_SELECT)
-            v->opt.cull_mode = (v->opt.cull_mode + 1) % 3;
 
-        if (pad.Buttons & PSP_CTRL_LEFT)
-            v->cam.yaw -= 1.8f * dt;
-        if (pad.Buttons & PSP_CTRL_RIGHT)
-            v->cam.yaw += 1.8f * dt;
-        if (pad.Buttons & PSP_CTRL_UP)
-            v->cam.pitch = fminf(v->cam.pitch + 1.2f * dt, 1.4f);
-        if (pad.Buttons & PSP_CTRL_DOWN)
-            v->cam.pitch = fmaxf(v->cam.pitch - 1.2f * dt, -1.4f);
-        v->cam.yaw = pw_wrap_angle(v->cam.yaw);
-        ax = ((float)pad.Lx - 128.0f) / 128.0f;
-        ay = (128.0f - (float)pad.Ly) / 128.0f;
-        if (fabsf(ax) < 0.25f)
-            ax = 0.0f;
-        if (fabsf(ay) < 0.25f)
-            ay = 0.0f;
-        fwd = vec4(pw_sinf(v->cam.yaw), pw_cosf(v->cam.yaw), 0.0f, 0.0f);
-        right = vec4(fwd.y, -fwd.x, 0.0f, 0.0f);
-        v->cam.pos.x += (fwd.x * ay + right.x * ax) * speed * dt;
-        v->cam.pos.y += (fwd.y * ay + right.y * ax) * speed * dt;
-        if (pad.Buttons & PSP_CTRL_RTRIGGER)
-            v->cam.pos.z += speed * dt;
-        if (pad.Buttons & PSP_CTRL_LTRIGGER)
-            v->cam.pos.z -= speed * dt;
-        if (v->zone.hdr)
-            check_border(v);
-
-        gfx_begin_frame(v->zone.hdr ? v->zone.hdr->fog_color : 0xFF202020u);
-        if (v->zone.hdr)
-            gfx_draw_zone(&v->zone, &v->cam, &v->opt, &v->stats);
-        gfx_end_frame(overlay, v);
+        gfx_begin_frame(a->game.zone.hdr ? a->game.zone.hdr->fog_color : 0xFF202020u);
+        if (a->game.zone.hdr) {
+            game_camera(&a->game, &cam);
+            gfx_draw_zone(&a->game.zone, &a->game.actors, &cam, &a->opt, &a->stats);
+        }
+        gfx_end_frame(hud, a);
 
         frames++;
         if (now - fps_t0 >= 1000000u) {
-            v->fps = (float)frames * 1e6f / (float)(now - fps_t0);
+            a->fps = (float)frames * 1e6f / (float)(now - fps_t0);
             frames = 0;
             fps_t0 = now;
         }
     }
     gfx_shutdown();
-    world_close(&v->world);
+    world_close(&a->world);
 }
 
 int main(int argc, char **argv)
@@ -366,11 +404,11 @@ int main(int argc, char **argv)
     sceCtrlSetSamplingCycle(0);
     sceCtrlSetSamplingMode(PSP_CTRL_MODE_ANALOG);
     mem_init();
-    g_v.selftest_ok = run_selftests();
+    g_app.selftest_ok = run_selftests();
     log_printf("\n[arena]\n");
     mem_dump(log_line, NULL);
     data_dir_from_argv(data_dir, sizeof(data_dir), argc, argv);
-    run_viewer(&g_v, data_dir);
+    run(&g_app, data_dir);
     sceKernelExitGame();
     return 0;
 }

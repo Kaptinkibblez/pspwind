@@ -23,15 +23,21 @@ src/                     PSP runtime (C99)
   vfpu.c/.h              VFPU math: matrices, quaternions, culling, ray tests
   pak.c/.h               DPAK packs on the Memory Stick (directory + on-demand reads)
   texcache.c/.h          swizzled texture cache (buddy allocator, eviction, fallback)
-  zone.c/.h              world index + validated zone/mesh loader, terrain heights
+  zone.c/.h              world index + validated zone/mesh/anim loader, terrain heights
   gfx.c/.h               sceGu renderer: fog, lights, culling, near-terrain tessellation
+  anim.c/.h              fixed-rate animation clips (sampling, groups, looping)
+  actor.c/.h             segmented rigid-limb NPCs/creatures: binding + posing
+  phys.c/.h              collision grid, cylinder-vs-triangle movement, gravity, swimming
+  game.c/.h              player controller, activation, doors, zone transitions (portable)
   selftest.c/.h          allocator + VFPU-vs-scalar test suite (host and device)
-  main.c                 boot self-test + zone viewer
+  main.c                 boot, PSP input, pause menu, HUD, frame loop
 tests/host/              native build of the portable runtime code + test runner
 tools/demake_cooker/     Python 3 + Pillow offline cooker
   cook_all.py            runs the whole pipeline (meshes -> world -> textures)
   tex_demaker.py         textures -> DTEX (T4/T8, swizzled) + icon atlases
   mesh_demaker.py        NIF -> DMESH (decimated, segmented skins, collision)
+  anim_demaker.py        KF -> DANIM (text-key groups, 15 fps, root motion -> speed)
+  actorpose.py           reference actor posing (preview + tests)
   world_demaker.py       ESM worldspace -> DZONE zones + DWORLD index
   esm.py                 TES3 ESM/ESP reader (load order merge) + writer
   nif.py                 NetImmerse 4.0.0.2 reader
@@ -78,8 +84,10 @@ make test
 
 `host-test` compiles the runtime's portable code natively (ASan + UBSan) and
 runs the shared self-test suite; `tools-test` runs the cooker unit tests;
-`world-test` cooks the synthetic test world and loads every zone through the
-real C loader (plus validator fuzzing). None of them needs the PSP toolchain.
+`world-test` cooks the synthetic test world, loads every zone through the
+real C loader (plus validator fuzzing) and plays it through `game.c` with
+scripted input (walking, collision, jumping, doors, swimming, zone borders,
+NPC animation). None of them needs the PSP toolchain.
 
 ## Cooking assets
 
@@ -93,10 +101,11 @@ python3 tools/demake_cooker/cook_all.py --data "/path/to/Morrowind/Data Files" -
 
 `--data` mounts a Data Files directory (its BSAs in Morrowind → Tribunal →
 Bloodmoon order, loose files overriding archives; ESMs in the same order).
-The pipeline cooks meshes, then zones (merging small statics using the cooked
-meshes), then only the textures that meshes and zones reference (plus UI art,
-icons and embedded NIF textures). Copy `meshes.dpak`, `textures.dpak` and
-`zones.dpak` to `ms0:/PSP/GAME/pspwind/data/`. Each step also runs on its own
+The pipeline cooks meshes, then animations, then zones (merging small statics
+and assembling NPCs from race body parts using the cooked meshes and clips),
+then only the textures that meshes and zones reference (plus UI art, icons
+and embedded NIF textures). Copy `meshes.dpak`, `anims.dpak`, `textures.dpak`
+and `zones.dpak` to `ms0:/PSP/GAME/pspwind/data/`. Each step also runs on its own
 (`mesh_demaker.py`, `world_demaker.py`, `tex_demaker.py`) with options such as
 `--ratio` (triangle budget, default 0.5), `--zone-size` (cells per zone side,
 default 3), `--merge-max-tris`, `--size`/`--small-size`, `--colors`,
@@ -121,8 +130,22 @@ cooked data in `build/psp/pspwind/` — copy that folder to `ms0:/PSP/GAME/`
 or load the EBOOT in PPSSPP.
 
 ![Software preview of the cooked test hamlet](docs/img/testworld_hamlet_preview.png)
+![Villager mid-stride (walk animation, segmented limbs)](docs/img/testworld_walk_side.png)
 
-Viewer controls: analog = move, D-pad = turn/look, R/L = up/down,
-X = go through a door, △/□ = next/previous zone, ○ = overlay,
-SELECT = cycle face culling (CW/CCW/off), START = quit. Walking off an
-exterior zone loads the neighbouring zone behind a loading card.
+Controls (scheme A; START → pause menu switches to scheme B, where the stick
+looks and the face buttons walk):
+
+| Input | Action |
+|---|---|
+| analog stick | walk / strafe |
+| △ / ✕ | look up / down |
+| □ / ○ | turn left / right |
+| R | activate (doors, NPCs, containers, items) |
+| L | jump |
+| D-pad ↑ / ↓ | run–walk toggle / sneak |
+| D-pad ← / → | cycle the nearest actor's animation (debug) |
+| SELECT | fly mode (debug noclip; R/L = up/down) |
+| START | pause menu: controls A/B, invert look, face culling, debug overlay, quit |
+
+Walking off an exterior zone loads the neighbouring zone behind a loading
+card; activating a door with a destination loads the target cell.

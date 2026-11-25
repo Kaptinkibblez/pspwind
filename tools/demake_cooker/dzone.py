@@ -10,7 +10,7 @@ import dmesh
 from dmcommon import BinWriter, StringTable, fnv1a32
 
 DZONE_MAGIC = b"DZON"
-DZONE_VERSION = 1
+DZONE_VERSION = 2
 DWORLD_MAGIC = b"DWLD"
 DWORLD_VERSION = 1
 GRID = 17
@@ -30,13 +30,19 @@ INST_STATIC, INST_ACTIVATOR, INST_DOOR, INST_CONTAINER, INST_LIGHT, INST_ITEM, \
 IF_MERGED = 1 << 0
 IF_PERSISTENT = 1 << 1
 IF_NO_MESH = 1 << 2
+IF_ACTOR = 1 << 3
+ACTOR_MAX_PARTS = 16
+ACTOR_F_FEMALE = 1 << 0
+ACTOR_F_BEAST = 1 << 1
+ACTOR_F_CREATURE = 1 << 2
 
-HEADER_FMT = "<4sHBBIII4hfIffII3fHHHHIIII9I3f3f3I"
+HEADER_FMT = "<4sHBBIII4hfIffII3fHHHHIIII9I3f3fHHII"
 CELL_FMT = "<hhHHIIIIIIIf2I"
 TERRAIN_FMT = "<hhHH2f2fIIIIII"
 INSTANCE_FMT = "<HBBHHII3f3ff4fI"
 DOOR_FMT = "<II3f3fIiII"
 LIGHT_FMT = "<3ffIIII"
+ACTOR_FMT = "<IHHHH16HII3I"
 WORLD_HEADER_FMT = "<4sHHIIIIIIII2I"
 WORLD_ZONE_FMT = "<IIIBBH4hII"
 WORLD_EXT_FMT = "<hhI"
@@ -45,10 +51,11 @@ WORLD_INT_FMT = "<II"
 SIZES = {name: struct.calcsize(fmt) for name, fmt in (
     ("DZoneHeader", HEADER_FMT), ("DZoneCell", CELL_FMT), ("DZoneTerrain", TERRAIN_FMT),
     ("DZoneInstance", INSTANCE_FMT), ("DZoneDoor", DOOR_FMT), ("DZoneLight", LIGHT_FMT),
+    ("DZoneActor", ACTOR_FMT),
     ("DWorldHeader", WORLD_HEADER_FMT), ("DWorldZone", WORLD_ZONE_FMT),
     ("DWorldExt", WORLD_EXT_FMT), ("DWorldInt", WORLD_INT_FMT))}
 assert SIZES == {"DZoneHeader": 160, "DZoneCell": 48, "DZoneTerrain": 48, "DZoneInstance": 64,
-                 "DZoneDoor": 48, "DZoneLight": 32, "DWorldHeader": 48, "DWorldZone": 32,
+                 "DZoneDoor": 48, "DZoneLight": 32, "DZoneActor": 64, "DWorldHeader": 48, "DWorldZone": 32,
                  "DWorldExt": 8, "DWorldInt": 8}, SIZES
 
 Vec3 = Tuple[float, float, float]
@@ -96,6 +103,15 @@ class ZInstance:
 
 
 @dataclass
+class ZActor:
+    instance: "ZInstance"
+    skeleton: int
+    anim: int
+    flags: int
+    parts: List[Tuple[int, int, bool]] = field(default_factory=list)  # mesh, bone hash, mirror
+
+
+@dataclass
 class ZDoor:
     dest_zone: int
     dest_pos: Vec3
@@ -132,6 +148,8 @@ class Zone:
     meshes: List[str] = field(default_factory=list)
     textures: List[str] = field(default_factory=list)
     terrain: List[ZTerrain] = field(default_factory=list)
+    anims: List[str] = field(default_factory=list)
+    actors: List[ZActor] = field(default_factory=list)
 
 
 def _rgb(c: Sequence[float]) -> int:
@@ -188,6 +206,23 @@ def write_zone(z: Zone) -> bytes:
     lights_ofs = w.align(16)
     for i, l in lights:
         w.pack(LIGHT_FMT[1:], *l.pos, l.radius, l.color, l.flags, i, 0)
+    inst_index = {id(ins): i for i, ins in enumerate(instances)}
+    anims_ofs = w.align(16)
+    for a in z.anims:
+        w.pack("I", fnv1a32(a))
+    actors_ofs = w.align(16)
+    actor_recs = w.reserve(SIZES["DZoneActor"] * len(z.actors))
+    for k, act in enumerate(z.actors):
+        if len(act.parts) > ACTOR_MAX_PARTS:
+            raise ValueError("too many actor parts")
+        bones_ofs = w.align(4)
+        for _m, bone, _mir in act.parts:
+            w.pack("I", bone)
+        meshes = [m for m, _b, _mir in act.parts] + [NONE16] * (ACTOR_MAX_PARTS - len(act.parts))
+        mirror = sum(1 << i for i, (_m, _b, mir) in enumerate(act.parts) if mir)
+        w.patch(actor_recs + k * SIZES["DZoneActor"], ACTOR_FMT[1:], inst_index[id(act.instance)],
+                act.skeleton, act.anim, act.flags, len(act.parts), *meshes, bones_ofs, mirror,
+                0, 0, 0)
     batches_ofs = w.align(16)
     batch_recs = w.reserve(dmesh.SIZES["batch"] * len(batches))
 
@@ -233,7 +268,8 @@ def write_zone(z: Zone) -> bytes:
             _rgb(z.ambient), _rgb(z.sun_color), *z.sun_dir, len(z.cells), len(z.meshes),
             len(z.textures), len(z.terrain), len(batches), len(instances), len(doors),
             len(lights), cells_ofs, meshes_ofs, textures_ofs, terrain_ofs, batches_ofs,
-            instances_ofs, doors_ofs, lights_ofs, strings_ofs, *lo, *hi, 0, 0, 0)
+            instances_ofs, doors_ofs, lights_ofs, strings_ofs, *lo, *hi, len(z.actors),
+            len(z.anims), actors_ofs, anims_ofs)
     return w.getvalue()
 
 
@@ -258,6 +294,7 @@ def read_zone(data: bytes) -> dict:
            "fog_far": fog_far, "ambient": dmesh.unpack_color(ambient),
            "sun_color": dmesh.unpack_color(sun), "sun_dir": sun_dir,
            "bbox_min": h[37:40], "bbox_max": h[40:43]}
+    nactors, nanims, actors_ofs, anims_ofs = h[43:47]
     out["cells"] = []
     for i in range(ncells):
         r = struct.unpack_from(CELL_FMT, data, cells_ofs + i * 48)
@@ -294,6 +331,15 @@ def read_zone(data: bytes) -> dict:
         out["doors"].append({"instance": r[0], "dest_zone": r[1], "dest_pos": r[2:5],
                              "dest_rot": r[5:8], "dest_cell_hash": r[8], "lock_level": r[9],
                              "key_hash": r[10], "trap_hash": r[11]})
+    out["anims"] = list(struct.unpack_from(f"<{nanims}I", data, anims_ofs)) if nanims else []
+    out["actors"] = []
+    for i in range(nactors):
+        r = struct.unpack_from(ACTOR_FMT, data, actors_ofs + 64 * i)
+        count = r[4]
+        bones = struct.unpack_from(f"<{count}I", data, r[21]) if count else ()
+        out["actors"].append({"instance": r[0], "skeleton": r[1], "anim": r[2], "flags": r[3],
+                              "parts": [(r[5 + k], bones[k], bool(r[22] >> k & 1))
+                                        for k in range(count)]})
     out["lights"] = []
     for i in range(nlights):
         r = struct.unpack_from(LIGHT_FMT, data, lights_ofs + 32 * i)

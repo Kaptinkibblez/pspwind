@@ -548,3 +548,81 @@ def textured_static_nif(texture="Textures\\Tx_Wood_01.TGA", geometry=None,
         source_texture(texture),
     ] + list(extra_props)
     return nif.write_nif(blocks, [0])
+
+
+# --------------------------------------------------------------------------
+# KF animation files
+# --------------------------------------------------------------------------
+
+
+def keyframe_track_data(rot_keys, trans_keys, rot_interp=1, trans_interp=1, xyz=None):
+    """rot_keys: [(t, (w, x, y, z))]; trans_keys: [(t, (x, y, z))].
+    xyz: optional ([(t, x)], [(t, y)], [(t, z)]) euler key groups instead of quats."""
+    def f(w):
+        if xyz is not None:
+            w.u32(1)
+            w.u32(4)
+            w.f32(0.0)
+            for keys in xyz:
+                w.u32(len(keys))
+                if keys:
+                    w.u32(1)
+                    for t, v in keys:
+                        w.f32(t)
+                        w.f32(v)
+        else:
+            w.u32(len(rot_keys))
+            if rot_keys:
+                w.u32(rot_interp)
+                for t, q in rot_keys:
+                    w.f32(t)
+                    w.floats(q)
+                    if rot_interp == 3:
+                        w.floats((0.0, 0.0, 0.0))
+        w.u32(len(trans_keys))
+        if trans_keys:
+            w.u32(trans_interp)
+            for t, v in trans_keys:
+                w.f32(t)
+                w.floats(v)
+                if trans_interp == 2:
+                    w.floats((0.0, 0.0, 0.0))
+                    w.floats((0.0, 0.0, 0.0))
+        w.u32(0)  # scales
+    return ("NiKeyframeData", f)
+
+
+def kf_file(text_keys, tracks) -> bytes:
+    """text_keys: [(time, "Idle: Start\\r\\nSoundGen: Left")];
+    tracks: [(bone name, NiKeyframeData block)] -> complete .kf bytes."""
+    n = len(tracks)
+    # layout: 0 helper, 1 text keys, then per track: string extra, controller, data
+    def ref_str(i): return 2 + 3 * i
+    def ref_ctrl(i): return 3 + 3 * i
+    def ref_data(i): return 4 + 3 * i
+
+    blocks = []
+
+    def helper(w):
+        _net(w, "", 1, ref_ctrl(0) if n else -1)
+    blocks.append(("NiSequenceStreamHelper", helper))
+
+    def tk(w):
+        w.i32(ref_str(0) if n else -1)
+        w.u32(0)
+        w.u32(len(text_keys))
+        for t, s in text_keys:
+            w.f32(t)
+            w.string(s)
+    blocks.append(("NiTextKeyExtraData", tk))
+    for i, (bone, data_block) in enumerate(tracks):
+        blocks.append(string_extra(bone, ref_str(i + 1) if i + 1 < n else -1))
+        blocks.append(keyframe_controller(-1, ref_data(i), ref_ctrl(i + 1) if i + 1 < n else -1))
+        blocks.append(data_block)
+    return nif.write_nif(blocks, [0])
+
+
+def quat_axis(axis, angle):
+    """(w, x, y, z) NIF-order quaternion for a rotation about a unit axis."""
+    s = math.sin(angle / 2.0)
+    return (math.cos(angle / 2.0), axis[0] * s, axis[1] * s, axis[2] * s)

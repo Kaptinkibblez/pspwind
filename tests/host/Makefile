@@ -18,8 +18,14 @@ all: run
 host_tests: test_main.c $(CORE) $(SRC_DIR)/selftest.c $(HDRS)
 	$(HOSTCC) $(CFLAGS) -o $@ test_main.c $(CORE) $(SRC_DIR)/selftest.c $(LDLIBS)
 
-world_test: world_test.c $(CORE) $(SRC_DIR)/pak.c $(SRC_DIR)/texcache.c $(SRC_DIR)/zone.c $(HDRS)
-	$(HOSTCC) $(CFLAGS) -o $@ world_test.c $(CORE) $(SRC_DIR)/pak.c $(SRC_DIR)/texcache.c $(SRC_DIR)/zone.c $(LDLIBS)
+WORLD_SRC := $(SRC_DIR)/pak.c $(SRC_DIR)/texcache.c $(SRC_DIR)/zone.c $(SRC_DIR)/anim.c
+GAME_SRC := $(WORLD_SRC) $(SRC_DIR)/actor.c $(SRC_DIR)/phys.c $(SRC_DIR)/game.c
+
+world_test: world_test.c $(CORE) $(WORLD_SRC) $(HDRS)
+	$(HOSTCC) $(CFLAGS) -o $@ world_test.c $(CORE) $(WORLD_SRC) $(LDLIBS)
+
+game_test: game_test.c $(CORE) $(GAME_SRC) $(HDRS)
+	$(HOSTCC) $(CFLAGS) -o $@ game_test.c $(CORE) $(GAME_SRC) $(LDLIBS)
 
 run: host_tests
 	./host_tests
@@ -29,8 +35,9 @@ $(BUILD)/testworld/data/zones.dpak: $(wildcard $(COOKER)/*.py)
 	$(PYTHON) $(COOKER)/make_testworld.py --out $(BUILD)/testworld
 	$(PYTHON) $(COOKER)/cook_all.py --data "$(BUILD)/testworld/Data Files" --out $(BUILD)/testworld/data --jobs 2
 
-world: world_test $(BUILD)/testworld/data/zones.dpak
+world: world_test game_test $(BUILD)/testworld/data/zones.dpak
 	./world_test $(BUILD)/testworld/data --expect-testworld
+	./game_test $(BUILD)/testworld/data
 
 clean:
-	rm -f host_tests world_test
+	rm -f host_tests world_test game_test
