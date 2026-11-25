@@ -185,6 +185,59 @@ def _batch_order(b: OutBatch) -> int:
     return 0
 
 
+def emit_batch(w: BinWriter, b: OutBatch) -> bytes:
+    """Append a batch's quantised vertices and u16 indices (16-byte aligned)
+    to w and return its 88-byte DMeshBatch record. Shared by DMESH and DZONE."""
+    nv = len(b.positions)
+    if nv > 65535:
+        raise ValueError("batch exceeds 65535 vertices (split before writing)")
+    if len(b.indices) % 3:
+        raise ValueError("index count not a multiple of 3")
+    off, scale = quant_params(b.positions)
+    uv_off, uv_scale = uv_params(b.uvs)
+    vofs = w.align(16)
+    for k in range(nv):
+        p = b.positions[k]
+        n = b.normals[k] if b.normals else (0.0, 0.0, 1.0)
+        uv = b.uvs[k] if b.uvs else (0.0, 0.0)
+        col = b.colors[k] if b.colors else (1.0, 1.0, 1.0, 1.0)
+        w.pack(VERTEX_FMT[1:],
+               _q16u((uv[0] - uv_off[0]) / uv_scale[0]),
+               _q16u((uv[1] - uv_off[1]) / uv_scale[1]),
+               pack_color(col), _q8n(n[0]), _q8n(n[1]), _q8n(n[2]), 0,
+               _q16s((p[0] - off[0]) / scale[0]), _q16s((p[1] - off[1]) / scale[1]),
+               _q16s((p[2] - off[2]) / scale[2]), 0)
+    iofs = w.align(16)
+    if b.indices:
+        w.bytes(struct.pack(f"<{len(b.indices)}H", *b.indices))
+    c, r = bound_sphere(b.positions)
+    return struct.pack(BATCH_FMT, b.node, b.texture, b.flags, b.alpha_ref, b.blend, nv,
+                       len(b.indices), vofs, iofs, *off, *scale, *uv_off, *uv_scale,
+                       pack_color(b.diffuse), pack_color((*b.emissive, 1.0)), *c, r)
+
+
+def parse_batch(data: bytes, ofs: int) -> dict:
+    """Decode one DMeshBatch record and its vertices/indices (tests, cookers)."""
+    r = struct.unpack_from(BATCH_FMT, data, ofs)
+    node, tex, bflags, aref, blend, nv, ni, vofs, iofs = r[:9]
+    off, scale, uv_off, uv_scale = r[9:12], r[12:15], r[15:17], r[17:19]
+    if vofs % 16 or iofs % 16:
+        raise ValueError("batch data misaligned")
+    verts = []
+    for k in range(nv):
+        u, v, col, nx, ny, nz, _p0, x, y, z, _p1 = struct.unpack_from(
+            VERTEX_FMT, data, vofs + k * SIZES["vertex"])
+        verts.append({
+            "pos": tuple(q / 32768.0 * scale[j] + off[j] for j, q in enumerate((x, y, z))),
+            "uv": (u / 32768.0 * uv_scale[0] + uv_off[0], v / 32768.0 * uv_scale[1] + uv_off[1]),
+            "normal": (nx / 127.0, ny / 127.0, nz / 127.0),
+            "color": unpack_color(col)})
+    idx = list(struct.unpack_from(f"<{ni}H", data, iofs)) if ni else []
+    return {"node": node, "texture": tex, "flags": bflags, "alpha_ref": aref, "blend": blend,
+            "vertices": verts, "indices": idx, "diffuse": unpack_color(r[19]),
+            "emissive": unpack_color(r[20]), "bound": r[21:25]}
+
+
 def write_dmesh(mesh: OutMesh) -> bytes:
     if len(mesh.nodes) > 0x7FFF:
         raise ValueError("too many nodes")
@@ -222,34 +275,9 @@ def write_dmesh(mesh: OutMesh) -> bytes:
 
     total_v = total_t = 0
     for i, b in enumerate(batches):
-        nv = len(b.positions)
-        if nv > 65535:
-            raise ValueError("batch exceeds 65535 vertices (split before writing)")
-        if len(b.indices) % 3:
-            raise ValueError("index count not a multiple of 3")
-        off, scale = quant_params(b.positions)
-        uv_off, uv_scale = uv_params(b.uvs)
-        vofs = w.align(16)
-        for k in range(nv):
-            p = b.positions[k]
-            n = b.normals[k] if b.normals else (0.0, 0.0, 1.0)
-            uv = b.uvs[k] if b.uvs else (0.0, 0.0)
-            col = b.colors[k] if b.colors else (1.0, 1.0, 1.0, 1.0)
-            w.pack(VERTEX_FMT[1:],
-                   _q16u((uv[0] - uv_off[0]) / uv_scale[0]),
-                   _q16u((uv[1] - uv_off[1]) / uv_scale[1]),
-                   pack_color(col), _q8n(n[0]), _q8n(n[1]), _q8n(n[2]), 0,
-                   _q16s((p[0] - off[0]) / scale[0]), _q16s((p[1] - off[1]) / scale[1]),
-                   _q16s((p[2] - off[2]) / scale[2]), 0)
-        iofs = w.align(16)
-        if b.indices:
-            w.bytes(struct.pack(f"<{len(b.indices)}H", *b.indices))
-        c, r = bound_sphere(b.positions)
-        w.patch(batch_recs + i * SIZES["batch"], BATCH_FMT[1:], b.node, b.texture, b.flags,
-                b.alpha_ref, b.blend, nv, len(b.indices), vofs, iofs, *off, *scale,
-                *uv_off, *uv_scale, pack_color(b.diffuse), pack_color((*b.emissive, 1.0)),
-                *c, r)
-        total_v += nv
+        rec = emit_batch(w, b)
+        w.buf[batch_recs + i * SIZES["batch"]:batch_recs + (i + 1) * SIZES["batch"]] = rec
+        total_v += len(b.positions)
         total_t += len(b.indices) // 3
 
     if coll_rec:
@@ -308,25 +336,7 @@ def read_dmesh(data: bytes) -> dict:
                                 "emit_rate": r[6], "lifetime": r[7], "gravity": r[15:18],
                                 "grow_time": r[18], "fade_time": r[19]})
     for i in range(n_batches):
-        r = struct.unpack_from(BATCH_FMT, data, batches_ofs + i * SIZES["batch"])
-        node, tex, bflags, aref, blend, nv, ni, vofs, iofs = r[:9]
-        off, scale, uv_off, uv_scale = r[9:12], r[12:15], r[15:17], r[17:19]
-        if vofs % 16 or iofs % 16:
-            raise ValueError("batch data misaligned")
-        verts = []
-        for k in range(nv):
-            u, v, col, nx, ny, nz, _p0, x, y, z, _p1 = struct.unpack_from(
-                VERTEX_FMT, data, vofs + k * SIZES["vertex"])
-            verts.append({
-                "pos": tuple(q / 32768.0 * scale[j] + off[j] for j, q in enumerate((x, y, z))),
-                "uv": (u / 32768.0 * uv_scale[0] + uv_off[0], v / 32768.0 * uv_scale[1] + uv_off[1]),
-                "normal": (nx / 127.0, ny / 127.0, nz / 127.0),
-                "color": unpack_color(col)})
-        idx = list(struct.unpack_from(f"<{ni}H", data, iofs)) if ni else []
-        out["batches"].append({"node": node, "texture": tex, "flags": bflags, "alpha_ref": aref,
-                               "blend": blend, "vertices": verts, "indices": idx,
-                               "diffuse": unpack_color(r[19]), "emissive": unpack_color(r[20]),
-                               "bound": r[21:25]})
+        out["batches"].append(parse_batch(data, batches_ofs + i * SIZES["batch"]))
     out["collision"] = None
     if coll_ofs:
         nv, nt, vofs, iofs, cflags, _r0 = struct.unpack_from(COLL_FMT, data, coll_ofs)[:6]

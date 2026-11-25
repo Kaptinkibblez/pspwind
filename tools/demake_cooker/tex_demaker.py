@@ -624,13 +624,17 @@ def collect_sources(source: DataSource, atlas_prefixes: Sequence[str],
     return tex, atlas
 
 
-def load_only_keys(path: Optional[str]) -> Optional[set]:
-    if not path:
+def load_only_keys(paths: Optional[Sequence[str]]) -> Optional[set]:
+    """Union of texture keys from JSON lists or cooker manifests ("textures")."""
+    if not paths:
         return None
-    with open(path, "r", encoding="utf-8") as f:
-        doc = json.load(f)
-    keys = doc.get("textures", doc) if isinstance(doc, dict) else doc
-    return {dmcommon.texture_key(k) for k in keys}
+    out: set = set()
+    for path in paths:
+        with open(path, "r", encoding="utf-8") as f:
+            doc = json.load(f)
+        keys = doc.get("textures", []) if isinstance(doc, dict) else doc
+        out.update(dmcommon.texture_key(k) for k in keys)
+    return out
 
 
 def parse_size_rules(rules: Sequence[str]) -> Tuple[Tuple[str, int], ...]:
@@ -663,7 +667,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help="path prefix packed into the icon atlas (default icons/)")
     ap.add_argument("--atlas-page", type=int, default=256)
     ap.add_argument("--icon-max", type=int, default=32)
-    ap.add_argument("--only-keys", help="JSON list (or mesh manifest) of texture keys to cook")
+    ap.add_argument("--only-keys", action="append", default=[],
+                    help="JSON list or cooker manifest of texture keys to cook (repeatable)")
     ap.add_argument("--limit", type=int, default=0, help="cook at most N textures (testing)")
     ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) - 1))
     ap.add_argument("--strict", action="store_true", help="exit non-zero on any failure")

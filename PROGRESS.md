@@ -2,12 +2,85 @@
 
 | Milestone | Scope | Status |
 |---|---|---|
-| 1 | Scaffold, Makefile, 32 MB arena (`mem.c`), VFPU math (`vfpu.c`), `tex_demaker.py`, `mesh_demaker.py` | **Done – awaiting review** |
-| 2 | `world_demaker.py` (17×17 terrain, batched cells) + `zone.c` + fogged `sceGu` renderer (`gfx.c`) | Not started |
+| 1 | Scaffold, Makefile, 32 MB arena (`mem.c`), VFPU math (`vfpu.c`), `tex_demaker.py`, `mesh_demaker.py` | Done |
+| 2 | `world_demaker.py` (17×17 terrain, batched cells) + `zone.c` + fogged `sceGu` renderer (`gfx.c`) | **Done – awaiting review** |
 | 3 | `phys.c` collision, controls, doors/zone transitions, segmented-limb animation | Not started |
 | 4 | `rpg_compiler.py`, MWScript VM (`vm.c`), dialogue + journal UI (`ui.c`) | Not started |
 | 5 | Combat, magic, inventory/barter/loot UI, character creation, levelling (`rpg.c`) | Not started |
 | 6 | AI (`ai.c`), audio mixer (`audio.c`), save/load (`save.c`), 30/60 FPS pass | Not started |
+
+## Milestone 2 — delivered
+
+### Cooker
+* `esm.py` — TES3 reader with engine-accurate load-order merging: object
+  overrides/deletes, per-cell reference merge keyed by (content file, ref
+  index) using the FRMR master byte, `MVRF` moved refs, `NAM0` persistence,
+  per-file `LTEX` indices, `VHGT` delta decoding and `VTEX` de-swizzling
+  (rules checked against OpenMW's `loadland.cpp`/`loadcell.cpp`/`cellref.cpp`).
+* `world_demaker.py` — cuts the exterior into 3×3-cell zones (`--zone-size`)
+  with a terrain-only fringe ring, one zone per interior. LAND → 17×17
+  patches (point samples of the 65×65 grid), per-quad VTEX textures batched
+  per texture, VCLR × baked sun lighting as vertex colour. Small statics are
+  merged per cell/texture into world-space batches (falls back to instancing
+  if a zone exceeds its budget); everything else stays an instance with a
+  world bound. Doors resolve DNAM/DODT to destination zones; LIGH refs become
+  zone lights; interior AMBI drives fog/ambient/sun.
+* `dzone.py` — DZONE/DWORLD writer/reader mirrored in `fmt.h`.
+* `cook_all.py` — meshes → zones → (referenced) textures in one command.
+* `make_testworld.py` — original Morrowind-format test world (ESM + BSA:
+  hills, shore, hamlet, trees, lantern, door into a cellar interior).
+* `preview_zone.py` — software rasteriser for cooked zones (near-plane
+  clipping, back-face culling, fog) to inspect cooked data on a PC.
+
+### Runtime
+* `pak.c` — DPAK directory in the DB region, binary-search lookups, chunked
+  Memory Stick reads.
+* `texcache.c` — buddy allocator over the 8 MB TEXTURE region, DTEX
+  validation, generation-based eviction across zone loads, magenta fallback.
+* `zone.c` — world index, zone + mesh loading into the ZONE region with full
+  bounds validation of every offset/count/index, precomputed placement and
+  node×dequant matrices, terrain height queries, spawn points, D-cache
+  write-back for the GE.
+* `gfx.c` — 5650 colour + 16-bit depth, GL-style projection, per-zone fog,
+  sun + 3 nearest point lights for instances, baked lighting for terrain,
+  VFPU frustum + fog-distance culling, opaque → alpha-test → water → sorted
+  alpha-blend passes, nearest-filtered mip-mapped CLUT textures with per-batch
+  `sceGuTexScale/Offset` dequantisation. Terrain within 1400 units of the
+  camera and the water plane are re-tessellated every frame into the
+  display list (4×/2× subdivision), so large triangles never cross the GE's
+  guard band.
+* `main.c` — boot self-tests, then a free-fly viewer: automatic loading-card
+  transitions at exterior zone borders, X through doors (debug teleport),
+  △/□ zone cycling, overlay with fps/draws/triangles/memory, SELECT cycles
+  face culling.
+
+### Verification run
+* `make` → `EBOOT.PBP` (305 KB), zero warnings under `-Werror`.
+* `make test`:
+  * 48/48 allocator + 54/54 math checks (ASan/UBSan)
+  * 64/64 cooker tests (adds ESM merge semantics, VHGT/VTEX codecs, rotation
+    convention, terrain sampling, door resolution, merge-budget fallback)
+  * world test: cooks the test world and loads all 5 zones through the real C
+    loader; the C placement matrices reproduce all 127 instance bounds the
+    Python cooker computed (cross-language rotation check); both doors
+    resolve; 0 texture misses; 4,000 corrupted zone/mesh blobs are rejected
+    or accepted without a single out-of-bounds read
+* Independent checks against PPSSPP's sources: VFPU `vmmul`/`vtfm`/`vcrsp`/
+  `vqmul` semantics, GE 16-bit texcoord/position decoding, fog = (view z +
+  far) × slope, light positions in world space.
+* `make package` → `build/psp/pspwind/` (EBOOT + cooked test world).
+* Software previews of the cooked zones: `docs/img/`.
+
+### Still not verified (needs a PSP or an emulator run)
+1. Nothing has executed on PSP hardware or in PPSSPP yet: building the
+   emulator was refused twice by this session's permission policy, even after
+   you asked for it. To let me run it here, allow `cmake`/`ninja` for the
+   PPSSPP headless build in the session's permission settings; otherwise run
+   `build/psp/pspwind/EBOOT.PBP` in PPSSPP yourself.
+2. On-screen facts to confirm in that run: face culling direction (SELECT
+   cycles CW / CCW / off if geometry appears inside-out), sun direction sign,
+   fps.
+3. Retail data still untested (no game files here).
 
 ## Milestone 1 — delivered
 

@@ -21,13 +21,22 @@ src/                     PSP runtime (C99)
   fmt.h                  cooked binary formats (shared contract with the cooker)
   mem.c/.h               strict 32 MB static arena (regions, marks, pools, buddy)
   vfpu.c/.h              VFPU math: matrices, quaternions, culling, ray tests
+  pak.c/.h               DPAK packs on the Memory Stick (directory + on-demand reads)
+  texcache.c/.h          swizzled texture cache (buddy allocator, eviction, fallback)
+  zone.c/.h              world index + validated zone/mesh loader, terrain heights
+  gfx.c/.h               sceGu renderer: fog, lights, culling, near-terrain tessellation
   selftest.c/.h          allocator + VFPU-vs-scalar test suite (host and device)
-  main.c                 Milestone 1 boot harness
+  main.c                 boot self-test + zone viewer
 tests/host/              native build of the portable runtime code + test runner
 tools/demake_cooker/     Python 3 + Pillow offline cooker
+  cook_all.py            runs the whole pipeline (meshes -> world -> textures)
   tex_demaker.py         textures -> DTEX (T4/T8, swizzled) + icon atlases
   mesh_demaker.py        NIF -> DMESH (decimated, segmented skins, collision)
+  world_demaker.py       ESM worldspace -> DZONE zones + DWORLD index
+  esm.py                 TES3 ESM/ESP reader (load order merge) + writer
   nif.py                 NetImmerse 4.0.0.2 reader
+  make_testworld.py      generates an original Morrowind-format test world
+  preview_zone.py        software preview of a cooked zone (PNG)
   decimate.py            quadric edge-collapse decimation
   dmesh.py, dmcommon.py  writers/readers, BSA, DPAK, hashing
   dev/nifxml_dump.py     verifies NIF layouts against niftools nif.xml
@@ -68,8 +77,9 @@ make test
 ```
 
 `host-test` compiles the runtime's portable code natively (ASan + UBSan) and
-runs the shared self-test suite; `tools-test` runs the cooker unit tests.
-Neither needs the PSP toolchain.
+runs the shared self-test suite; `tools-test` runs the cooker unit tests;
+`world-test` cooks the synthetic test world and loads every zone through the
+real C loader (plus validator fuzzing). None of them needs the PSP toolchain.
 
 ## Cooking assets
 
@@ -78,16 +88,41 @@ pip install -r tools/demake_cooker/requirements.txt
 ```
 
 ```bash
-python3 tools/demake_cooker/mesh_demaker.py --data "/path/to/Morrowind/Data Files" --out build/cooked
-```
-
-```bash
-python3 tools/demake_cooker/tex_demaker.py --data "/path/to/Morrowind/Data Files" --data build/cooked/loose --out build/cooked --only-keys build/cooked/meshes_manifest.json
+python3 tools/demake_cooker/cook_all.py --data "/path/to/Morrowind/Data Files" --out build/cooked
 ```
 
 `--data` mounts a Data Files directory (its BSAs in Morrowind → Tribunal →
-Bloodmoon order, loose files overriding archives). Cooking meshes first lets
-the texture pass cook only textures the models use (plus embedded NIF
-textures, written to `build/cooked/loose`). Useful options: `--ratio`
-(triangle budget, default 0.5), `--size`/`--small-size` (64/32 px),
-`--colors auto|16|256`, `--dither`, `--jobs N`, `--limit N`, `--strict`.
+Bloodmoon order, loose files overriding archives; ESMs in the same order).
+The pipeline cooks meshes, then zones (merging small statics using the cooked
+meshes), then only the textures that meshes and zones reference (plus UI art,
+icons and embedded NIF textures). Copy `meshes.dpak`, `textures.dpak` and
+`zones.dpak` to `ms0:/PSP/GAME/pspwind/data/`. Each step also runs on its own
+(`mesh_demaker.py`, `world_demaker.py`, `tex_demaker.py`) with options such as
+`--ratio` (triangle budget, default 0.5), `--zone-size` (cells per zone side,
+default 3), `--merge-max-tris`, `--size`/`--small-size`, `--colors`,
+`--dither`, `--jobs`, `--limit`, `--strict`. Every step writes a
+`*_manifest.json` with statistics and failures.
+
+Check a cooked zone on the PC without a PSP:
+
+```bash
+python3 tools/demake_cooker/preview_zone.py --data build/cooked --zone zone/ext_-1_-3 --out shot.png --eye -6000 -21000 600 --yaw 0 --pitch -10
+```
+
+## Try it without Morrowind
+
+```bash
+make package
+```
+
+Generates an original test world (`make_testworld.py`: hills, a shoreline, a
+hamlet, a cellar behind a door), cooks it, and puts `EBOOT.PBP` plus the
+cooked data in `build/psp/pspwind/` — copy that folder to `ms0:/PSP/GAME/`
+or load the EBOOT in PPSSPP.
+
+![Software preview of the cooked test hamlet](docs/img/testworld_hamlet_preview.png)
+
+Viewer controls: analog = move, D-pad = turn/look, R/L = up/down,
+X = go through a door, △/□ = next/previous zone, ○ = overlay,
+SELECT = cycle face culling (CW/CCW/off), START = quit. Walking off an
+exterior zone loads the neighbouring zone behind a loading card.

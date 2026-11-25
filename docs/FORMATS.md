@@ -70,3 +70,34 @@ Node/space conventions:
 * `DMESH_BATCH_F_SEGMENT` batches belong to a skinned mesh converted to
   rigid limbs: each triangle was assigned to its dominant bone and stored in
   that bone's space, so drawing = one matrix per limb, no skinning
+
+## DWORLD — zone directory (`zones.dpak` entry `world`)
+
+Zone table (`entry_hash` of the zone's pack entry, display name, kind,
+exterior cell range, byte size), a sorted exterior map `(x, y) → zone` and a
+sorted interior map `hash(lower-case cell name) → zone`. Both maps are binary
+searched at runtime (door destinations, walking across zone borders).
+
+## DZONE — one loadable zone
+
+Exterior zones cover `zone_size × zone_size` cells (default 3×3) plus a
+fringe ring of neighbour cells as terrain only; interior zones are one cell.
+Everything is world space (Morrowind units, +Z up).
+
+| Section | Contents |
+|---|---|
+| header | kind, flags (water / terrain), core cell range, water height, fog colour + near/far, ambient, sun colour + direction, bbox |
+| cells | grid position, fringe flag, terrain patch, batch range, instance range |
+| meshes | hashes of the DMESH models the instances use |
+| textures | `{hash, name}` used by terrain and merged batches |
+| terrain | 17×17 heights (`float`), 17×17 baked colours, 16×16 per-quad texture ids, range of its static batches |
+| batches | `DMeshBatch` records in world space; `node` = cell slot, `texture` = zone texture |
+| instances | placed references: mesh, kind, flags (merged / persistent / no mesh), cell, door, object id hash, refnum, pos, Morrowind euler rot, scale, world bound sphere |
+| doors | destination zone, position + rotation, destination cell hash, lock level, key, trap |
+| lights | LIGH references: position, radius, colour, flags |
+
+Placement follows OpenMW: `world = T(pos) · Rx(−rx) · Ry(−ry) · Rz(−rz) · S(scale)`
+(Morrowind's Z rotation is clockwise seen from above). Static models up to
+`--merge-max-tris` triangles are pre-transformed into the cell batches and
+keep an instance flagged `DZONE_IF_MERGED` (collision only). If merging
+pushes a zone over its memory budget the cooker rebuilds it instanced.

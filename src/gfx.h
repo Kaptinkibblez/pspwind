@@ -1,0 +1,60 @@
+/*
+ * gfx.h - PS1/PSP-style sceGu renderer (PSP only).
+ *
+ * 16-bit 5650 colour + 16-bit depth, nearest-filtered paletted textures,
+ * Gouraud vertex colours, thick per-zone distance fog, hardware sun + up to
+ * three point lights for instanced models, baked lighting for terrain and
+ * merged statics, alpha-tested foliage, sorted alpha blending, translucent
+ * water plane, VFPU frustum + fog-distance culling, and on-the-fly
+ * re-tessellation of terrain next to the camera (keeps big ground triangles
+ * inside the GE guard band so they do not pop out).
+ */
+#ifndef PSPWIND_GFX_H
+#define PSPWIND_GFX_H
+
+#include "common.h"
+#include "vfpu.h"
+#include "zone.h"
+
+#define GFX_SCREEN_W 480
+#define GFX_SCREEN_H 272
+
+typedef struct {
+    Vec4 pos;     /* eye position, world units */
+    float yaw;    /* radians, 0 = north (+Y), positive turns east */
+    float pitch;  /* radians, positive looks up */
+    float fov_y;  /* radians */
+} Camera;
+
+enum { GFX_CULL_CW = 0, GFX_CULL_CCW = 1, GFX_CULL_OFF = 2 };
+
+typedef struct {
+    int cull_mode;       /* GFX_CULL_*: which winding the GE treats as front */
+    int near_terrain;    /* re-tessellate terrain near the camera */
+    int draw_water;
+    float near_radius;   /* re-tessellation radius in world units */
+} GfxOptions;
+
+typedef struct {
+    uint32_t draws;
+    uint32_t triangles;
+    uint32_t culled;
+    uint32_t tex_binds;
+    uint32_t near_quads;
+    uint32_t list_bytes;
+} GfxStats;
+
+int gfx_init(void);
+void gfx_shutdown(void);
+void gfx_default_options(GfxOptions *o);
+void gfx_camera_forward(const Camera *cam, Vec4 *fwd);
+
+void gfx_begin_frame(uint32_t clear_abgr);
+void gfx_draw_zone(const Zone *z, const Camera *cam, const GfxOptions *opt, GfxStats *stats);
+/* Finishes the display list, waits for the GE, lets the caller draw debug
+ * text into the finished frame (overlay may be NULL) and flips at vblank. */
+void gfx_end_frame(void (*overlay)(void *user), void *user);
+/* Full-screen loading card drawn immediately (used during zone loads). */
+void gfx_loading_screen(const char *title, const char *subtitle, uint32_t bg_abgr);
+
+#endif /* PSPWIND_GFX_H */

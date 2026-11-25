@@ -28,6 +28,22 @@ Other rules:
   one `asm` statement and reuse it across following statements.
 * Angles are wrapped to [-π, π) before reaching `vsin`/`vcos`.
 
+## Independent cross-check against PPSSPP's interpreter
+
+PPSSPP's VFPU interpreter (`Core/MIPS/InterpreterVFPU.cpp`,
+`MIPSVFPUUtils.cpp`), which is validated against real hardware, was read to
+confirm the table above from a second source:
+
+* registers are stored column-major (`v[mtx*16 + col*4 + row]`)
+* `vtfm` computes `d[i] = dot(column i of S, v)`, i.e. Sᵀ·v; the `E` form
+  sets the transpose bit and yields M·v
+* `vmmul` executes Sᵀ·T, **but the assembler encodes the S operand
+  transposed** (`vmmul.q M200, M000, M100` is emitted with `vs = 0x20`, the
+  `E000` encoding - checked by decoding our object file and libpspgum's), so
+  the instruction as written means S·T
+* `vcrsp.t` is s × t; `vqmul.q` is the Hamilton product with (x, y, z, w)
+  layout (`d0 = s0·t3 + s1·t2 − s2·t1 + s3·t0`)
+
 ## Verification
 
 * Host: `make host-test` runs the shared suite (`src/selftest.c`) against

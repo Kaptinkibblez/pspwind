@@ -14,6 +14,7 @@ sys.path.insert(0, COOKER)
 
 import dmcommon  # noqa: E402
 import dmesh  # noqa: E402
+import dzone  # noqa: E402
 import tex_demaker  # noqa: E402
 
 
@@ -120,6 +121,7 @@ class LayoutContractTests(unittest.TestCase):
         "DMeshTexture": dmesh.SIZES["texture"],
         "DMeshEmitter": dmesh.SIZES["emitter"],
         "DMeshCollision": dmesh.SIZES["collision"],
+        **dzone.SIZES,
     }
 
     def test_sizes_match_c_header(self):

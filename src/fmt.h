@@ -279,6 +279,199 @@ typedef struct {
     uint32_t reserved1;
 } DMeshCollision;
 
+/* ------------------------------------------------------------------------ */
+/* DZONE - one loadable zone: a block of exterior cells (plus a fringe ring */
+/* of terrain-only neighbours) or one interior cell. zones.dpak entries are */
+/* named "zone/ext_<zx>_<zy>" and "zone/int/<lower-case cell name>".        */
+/* All positions are world space (Morrowind units, +Z up).                  */
+/* ------------------------------------------------------------------------ */
+#define DZONE_MAGIC FMT_FOURCC('D', 'Z', 'O', 'N')
+#define DZONE_VERSION 1
+#define DZONE_TERRAIN_GRID 17   /* vertices per patch side */
+#define DZONE_NONE 0xFFFFu
+#define DZONE_NO_ZONE 0xFFFFFFFFu
+
+enum { DZONE_KIND_EXTERIOR = 0, DZONE_KIND_INTERIOR = 1 };
+
+enum {
+    DZONE_F_WATER = 1 << 0,   /* draw a water plane at water_height */
+    DZONE_F_TERRAIN = 1 << 1, /* has terrain patches */
+    DZONE_F_QUASI_EXTERIOR = 1 << 2
+};
+
+enum {
+    DZONE_CELL_F_FRINGE = 1 << 0, /* neighbour shown as terrain only */
+    DZONE_CELL_F_WATER = 1 << 1
+};
+
+/* Instance kinds (what the placed record is). */
+enum {
+    DZONE_INST_STATIC = 0,
+    DZONE_INST_ACTIVATOR,
+    DZONE_INST_DOOR,
+    DZONE_INST_CONTAINER,
+    DZONE_INST_LIGHT,
+    DZONE_INST_ITEM,
+    DZONE_INST_NPC,
+    DZONE_INST_CREATURE,
+    DZONE_INST_LEVELED,
+    DZONE_INST_OTHER
+};
+
+enum {
+    DZONE_IF_MERGED = 1 << 0,     /* geometry baked into cell batches; collision only */
+    DZONE_IF_PERSISTENT = 1 << 1, /* persistent reference */
+    DZONE_IF_NO_MESH = 1 << 2     /* model missing / actor assembled at runtime */
+};
+
+typedef struct {
+    uint32_t magic; /* DZONE_MAGIC */
+    uint16_t version;
+    uint8_t kind;   /* DZONE_KIND_* */
+    uint8_t flags;  /* DZONE_F_* */
+    uint32_t file_size;
+    uint32_t name_hash; /* hash of the pack entry name */
+    uint32_t name_ofs;  /* display name, relative to strings_ofs */
+    int16_t cell_x0, cell_y0, cell_x1, cell_y1; /* core exterior cells, inclusive */
+    float water_height;
+    uint32_t fog_color; /* ABGR8888 */
+    float fog_near;
+    float fog_far;
+    uint32_t ambient;   /* ABGR8888 */
+    uint32_t sun_color; /* ABGR8888 */
+    float sun_dir[3];   /* direction light travels (normalised) */
+    uint16_t cell_count;
+    uint16_t mesh_count;
+    uint16_t texture_count;
+    uint16_t terrain_count;
+    uint32_t batch_count;
+    uint32_t instance_count;
+    uint32_t door_count;
+    uint32_t light_count;
+    uint32_t cells_ofs;     /* DZoneCell[] */
+    uint32_t meshes_ofs;    /* uint32_t mesh hash[] (meshes.dpak) */
+    uint32_t textures_ofs;  /* DMeshTexture[] (textures.dpak) */
+    uint32_t terrain_ofs;   /* DZoneTerrain[] */
+    uint32_t batches_ofs;   /* DMeshBatch[]: node = cell slot, texture = zone texture */
+    uint32_t instances_ofs; /* DZoneInstance[], grouped by cell */
+    uint32_t doors_ofs;     /* DZoneDoor[] */
+    uint32_t lights_ofs;    /* DZoneLight[] */
+    uint32_t strings_ofs;
+    float bbox_min[3];
+    float bbox_max[3];
+    uint32_t reserved[3];
+} DZoneHeader;
+
+typedef struct {
+    int16_t x, y;       /* exterior grid (0,0 for interiors) */
+    uint16_t flags;     /* DZONE_CELL_F_* */
+    uint16_t terrain;   /* index into terrain or DZONE_NONE */
+    uint32_t name_hash;
+    uint32_t name_ofs;
+    uint32_t region_hash;
+    uint32_t first_batch, batch_count;
+    uint32_t first_instance, instance_count;
+    float water_height;
+    uint32_t reserved[2];
+} DZoneCell;
+
+/*
+ * Terrain patch. The static batches render it at 512-unit quads; near the
+ * camera the runtime re-tessellates quads from these grids instead (the GE
+ * drops triangles whose clipped projection leaves its guard band).
+ */
+typedef struct {
+    int16_t x, y;
+    uint16_t flags;
+    uint16_t reserved0;
+    float origin[2];   /* world x,y of vertex (0,0) */
+    float min_h, max_h;
+    uint32_t heights_ofs;  /* float[17*17], row-major, rows run north (+Y) */
+    uint32_t colors_ofs;   /* uint32_t[17*17] baked ABGR8888 vertex colours */
+    uint32_t quad_tex_ofs; /* uint16_t[16*16] zone texture index per quad */
+    uint32_t first_batch;  /* static terrain batches of this patch (zone batch ids) */
+    uint32_t batch_count;
+    uint32_t reserved1;
+} DZoneTerrain;
+
+typedef struct {
+    uint16_t mesh;   /* zone mesh index or DZONE_NONE */
+    uint8_t kind;    /* DZONE_INST_* */
+    uint8_t flags;   /* DZONE_IF_* */
+    uint16_t cell;   /* zone cell slot */
+    uint16_t door;   /* index into doors or DZONE_NONE */
+    uint32_t object_hash; /* pw_hash_name(record id) */
+    uint32_t refnum;      /* content file << 24 | ref index */
+    float pos[3];
+    float rot[3];    /* Morrowind euler radians: R = Rx(-x) Ry(-y) Rz(-z) */
+    float scale;
+    float bound[4];  /* world-space bounding sphere */
+    uint32_t reserved;
+} DZoneInstance;
+
+typedef struct {
+    uint32_t instance;
+    uint32_t dest_zone;  /* DWORLD zone index or DZONE_NO_ZONE */
+    float dest_pos[3];
+    float dest_rot[3];
+    uint32_t dest_cell_hash; /* interior cell name hash or 0 */
+    int32_t lock_level;
+    uint32_t key_hash;
+    uint32_t trap_hash;
+} DZoneDoor;
+
+typedef struct {
+    float pos[3];
+    float radius;
+    uint32_t color;  /* ABGR8888 */
+    uint32_t flags;  /* LIGH LHDT flags */
+    uint32_t instance;
+    uint32_t reserved;
+} DZoneLight;
+
+/* ------------------------------------------------------------------------ */
+/* DWORLD - zone directory, pack entry "world"                              */
+/* ------------------------------------------------------------------------ */
+#define DWORLD_MAGIC FMT_FOURCC('D', 'W', 'L', 'D')
+#define DWORLD_VERSION 1
+
+typedef struct {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t zone_size;   /* exterior cells per zone side */
+    uint32_t zone_count;
+    uint32_t ext_count;
+    uint32_t int_count;
+    uint32_t zones_ofs;   /* DWorldZone[zone_count] */
+    uint32_t ext_ofs;     /* DWorldExt[ext_count], sorted by (x, y) */
+    uint32_t int_ofs;     /* DWorldInt[int_count], sorted by hash */
+    uint32_t strings_ofs;
+    uint32_t file_size;
+    uint32_t reserved[2];
+} DWorldHeader;
+
+typedef struct {
+    uint32_t entry_hash; /* zones.dpak entry */
+    uint32_t cell_hash;  /* interior name hash, 0 for exterior zones */
+    uint32_t name_ofs;
+    uint8_t kind;
+    uint8_t flags;
+    uint16_t cell_count;
+    int16_t x0, y0, x1, y1; /* exterior cell range (inclusive) */
+    uint32_t bytes;      /* zone entry size */
+    uint32_t reserved;
+} DWorldZone;
+
+typedef struct {
+    int16_t x, y;
+    uint32_t zone;
+} DWorldExt;
+
+typedef struct {
+    uint32_t hash;
+    uint32_t zone;
+} DWorldInt;
+
 /* Layout contract shared with the Python cookers. */
 PW_STATIC_ASSERT(sizeof(DPakHeader) == 32, dpak_header);
 PW_STATIC_ASSERT(sizeof(DPakEntry) == 16, dpak_entry);
@@ -293,5 +486,16 @@ PW_STATIC_ASSERT(sizeof(DMeshBatch) == 88, dmesh_batch);
 PW_STATIC_ASSERT(sizeof(DMeshTexture) == 8, dmesh_texture);
 PW_STATIC_ASSERT(sizeof(DMeshEmitter) == 72, dmesh_emitter);
 PW_STATIC_ASSERT(sizeof(DMeshCollision) == 48, dmesh_collision);
+
+PW_STATIC_ASSERT(sizeof(DZoneHeader) == 160, dzone_header);
+PW_STATIC_ASSERT(sizeof(DZoneCell) == 48, dzone_cell);
+PW_STATIC_ASSERT(sizeof(DZoneTerrain) == 48, dzone_terrain);
+PW_STATIC_ASSERT(sizeof(DZoneInstance) == 64, dzone_instance);
+PW_STATIC_ASSERT(sizeof(DZoneDoor) == 48, dzone_door);
+PW_STATIC_ASSERT(sizeof(DZoneLight) == 32, dzone_light);
+PW_STATIC_ASSERT(sizeof(DWorldHeader) == 48, dworld_header);
+PW_STATIC_ASSERT(sizeof(DWorldZone) == 32, dworld_zone);
+PW_STATIC_ASSERT(sizeof(DWorldExt) == 8, dworld_ext);
+PW_STATIC_ASSERT(sizeof(DWorldInt) == 8, dworld_int);
 
 #endif /* PSPWIND_FMT_H */
