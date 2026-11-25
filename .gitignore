@@ -1,0 +1,20 @@
+# PSP build outputs
+*.o
+*.elf
+*.prx
+*.SFO
+EBOOT.PBP
+PARAM.SFO
+tests/host/host_tests
+
+# Python
+__pycache__/
+*.pyc
+
+# Cooked data and retail game files never go into the repository
+build/
+cooked/
+Data Files/
+*.bsa
+*.esm
+*.esp
