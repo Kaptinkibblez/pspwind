@@ -4,10 +4,158 @@
 |---|---|---|
 | 1 | Scaffold, Makefile, 32 MB arena (`mem.c`), VFPU math (`vfpu.c`), `tex_demaker.py`, `mesh_demaker.py` | Done |
 | 2 | `world_demaker.py` (17×17 terrain, batched cells) + `zone.c` + fogged `sceGu` renderer (`gfx.c`) | Done |
-| 3 | `phys.c` collision, controls, doors/zone transitions, segmented-limb animation | **Done – awaiting review** |
-| 4 | `rpg_compiler.py`, MWScript VM (`vm.c`), dialogue + journal UI (`ui.c`) | Not started |
+| 3 | `phys.c` collision, controls, doors/zone transitions, segmented-limb animation | Done |
+| 4 | `rpg_compiler.py`, MWScript VM (`vm.c`), dialogue + journal UI (`ui.c`) | **Done – awaiting review** |
 | 5 | Combat, magic, inventory/barter/loot UI, character creation, levelling (`rpg.c`) | Not started |
 | 6 | AI (`ai.c`), audio mixer (`audio.c`), save/load (`save.c`), 30/60 FPS pass | Not started |
+
+## Milestone 4 — delivered
+
+### Cooker
+* `mwsig.py` — all 511 MWScript verbs with their signatures (argument
+  letters `f l s c S x X z j /`, return type, explicit-reference support),
+  including the generated attribute/skill/dynamic/magic-effect/control
+  families. `gen_mwfuncs.py` writes the matching C enum, signature table and
+  stat-family table (`src/mwfuncs.h`); a test fails if it is stale.
+* `mwscript.py` — MWScript compiler to a compact typed stack bytecode
+  (`MWBC_*`, 48 opcodes). Reproduces the original grammar's quirks: `,`/`:`
+  as whitespace, `[ ]` = `( )`, names with `-`/`'`/leading digits, greedy
+  comparison-operator scanning (`=` and `= =` mean `==`), unparenthesised
+  arguments ending at `+ - ==…` but not at `* /`, unary minus binding
+  tightest, locals shadowing functions, unknown names parsed as numbers,
+  MessageBox arguments typed from the format string, optional/ignored
+  arguments, `ref->Func`, `ref.var` (object or global-script members),
+  declarations anywhere. Errors skip the line with a warning; a broken
+  `if` condition compiles to false and missing `endif`/`endwhile` are
+  closed, so one bad line never loses a whole script. Dialogue result
+  scripts compile in dynamic mode (speaker locals resolved by name at run
+  time). Includes a disassembler.
+* `rpg_compiler.py` → `rpg.dpak`:
+  * `rpg/core` (resident): objects of 23 record types with type-specific
+    stats (NPC/creature stat blocks, inventories, spell lists, weapon damage,
+    armour, books, potions/ingredient effects, leveled lists, containers,
+    lights, classes, races, regions), spells + enchantments with effects,
+    factions (rank names, requirements, reactions), globals, all GMSTs,
+    scripts + local variable tables, start scripts, topics (alphabetical +
+    hash index), INFOs and conditions, text block directory, name pool.
+  * `text/<n>`: ~32 KB raw-DEFLATE blocks of INFO and book text plus the
+    compiled result scripts, read and inflated on demand.
+  * `script/<id>`: bytecode + string pool, paged in on first run.
+  * INFO lists merge across the load order with OpenMW's PNAM/NNAM rules
+    (replace in place, move, insert after prev / before next, delete).
+  * SCVR rules decode to typed conditions; header filters (actor, race,
+    class, faction + rank, factionless "FFFF", rank, gender, PC faction/rank,
+    cell prefix) become conditions tested first.
+  * Book HTML is converted to plain text; Windows-1252 punctuation is
+    transliterated for the 8×8 font; explicit `@topic#` links are flattened.
+  * Writes `rpg_report.json` (counts, script errors, warning totals, text
+    raw/packed sizes). `cook_all.py` runs it after the world step.
+
+### Runtime
+* `inflate.c` — allocation-free raw DEFLATE decoder (stored/fixed/dynamic).
+* `rpgdb.c` — validates the core once (sorted tables, bounds of every
+  index), binary-searched lookups, LRU cache of 4 inflated text blocks,
+  384 KB bump cache for script bytecode (flushed wholesale when full).
+* `vm.c` — interpreter (typed stack, 200 000-instruction budget per run,
+  every operand bounds checked) and the scripted game state:
+  * globals (with game time: GameHour/Day/Month/Year/DaysPassed advance with
+    TimeScale), script instances whose locals persist across zone loads
+    (keyed by object id for unique references, zone + refnum otherwise; a
+    member access before a reference was ever loaded creates the instance
+    lazily and the placed reference adopts it), global/targeted scripts,
+    StartScript/StopScript/ScriptRunning, start scripts.
+  * per-reference stat store (attributes, skills, health/magicka/fatigue
+    base + current, magic-effect values, AI hello/fight/flee/alarm,
+    disposition, reputation, level, crime, rank, deaths, enable state)
+    seeded from the record — the whole Get/Set/Mod verb families work.
+  * inventories and spell lists (AddItem/RemoveItem/GetItemCount,
+    AddSpell/RemoveSpell/GetSpell), seeded from the record lists.
+  * journal (entries dated, quest index, finished/restart flags,
+    "journal updated" notice), known topics, heard infos, player faction
+    ranks/reputation/expulsion, faction reactions.
+  * MessageBox with buttons + GetButtonPressed, Choice, Goodbye,
+    ForceGreeting, OnActivate/OnDeath/OnKnockout/OnMurder one-frame events,
+    text defines (`%PCName %PCRace %PCClass %PCRank %NextPCRank
+    %PCCrimeLevel %Name %Race %Class %Faction %Rank %Cell` + globals).
+  * World verbs go to the host (`game.c`): Activate, GetDistance,
+    Get/SetPos, Get/SetAngle, Position, PositionCell (player), CellChanged,
+    GetInterior, GetPCRunning/Sneaking/Jumping, player controls,
+    PlayGroup/LoopGroup on actors, Enable/Disable (hides the instance for
+    rendering, collision and targeting; persists per reference).
+* `dialogue.c` — OpenMW's filter order: greetings (Greeting topics in name
+  order, no refusal fallback), topic answers with Info Refusal when only the
+  disposition fails, creatures only answer infos with their id, all 74 SCVR
+  functions plus Global/Local/Journal/Item/Dead/Not* kinds with
+  Integer/Numeric/Boolean/Inverted semantics, Choice re-runs the last topic,
+  Goodbye, topic learning from responses (longest keyword at a word start,
+  only when the speaker can answer), heard/exhausted topics.
+* `ui.c` + `ui_gu.c` — 8×8 MSX font (from PSPSDK) on a 6 px advance
+  (80×30 characters), drawn as GE sprites from a 128×128 T4 texture in one
+  draw call per text run. Dialogue window (history with hyperlinks, topic
+  list + Goodbye, link focus, choices, scrolling, disposition), journal menu
+  on SELECT with Journal / Quests / Topics tabs, book reader with "take",
+  modal message boxes, toasts for notices. A host backend rasterises the
+  same command list for tests and screenshots.
+* `game.c` — scripted activation (OnActivate scripts decide, `Activate`
+  performs the default), talking to NPCs/creatures, item pickup into the
+  inventory, books, names in the target prompt, menu mode pauses the world
+  while scripts keep running. SELECT now opens the journal; fly mode moved
+  to the pause menu.
+
+### Test world additions
+"The Weaver's Lost Ring": two greetings, a rumor topic that seeds the quest
+topic, a Choice, an Info Refusal gated by disposition, journal stages 10/20/
+100 (finished), an OnActivate ring script with a MessageBox, a start script
+with a button, a speaker-local result script, ModDisposition, AddItem/
+RemoveItem, a faction with ranks, classes, a book, a weapon, a spell and an
+enchantment, GMSTs and globals, and a deliberately broken script.
+
+![Dialogue with hyperlinks](docs/img/ui_dialogue_links.png)
+![Choice](docs/img/ui_dialogue_choice.png)
+![Journal](docs/img/ui_journal.png)
+![Book](docs/img/ui_book.png)
+
+### Verification run
+* `make` → `EBOOT.PBP` (454 KB), zero warnings under `-Werror`.
+* `make test`: 102 host checks; **121 cooker tests** (adds 27 compiler
+  tests for the scanner/precedence/argument-mode/member/MessageBox/error
+  recovery rules, INFO merge order, SCVR decoding, book HTML, blob store,
+  the full cook of the test world, load-order merging, the generated-header
+  freshness check and the extended C/Python layout + opcode contract);
+  world test; game test 40/40; **rpg test 73/73** — inflate vectors,
+  database contents, the start-script message box and button, the whole
+  quest through `dialogue.c` + `vm.c` (greetings, `%` defines, link spans,
+  learning rules, Info Refusal, Choice, locked topics while choosing,
+  journal stages and dates, OnActivate event lasting one frame, reward
+  script on the speaker's locals, disposition-gated topic), the Goodbye
+  branch, game time, then 4 000 fuzzed bytecode programs under ASan/UBSan;
+  **ui test 58/58** — the same quest played with button presses through
+  `game.c` + `ui.c` exactly like `main.c` (walk up, R to talk, follow a
+  hyperlink, answer a choice, journal tabs, enter the cellar, read and take
+  a book, pick up the scripted ring, claim the reward, the ring stays gone
+  after reloading the cellar), no script errors, no unhandled verbs.
+
+### Deferred to their milestones (by design, not stubs)
+* Verbs for systems that do not exist yet run through the host and return
+  the neutral value when nothing handles them (counted in `vm->unhandled`):
+  AI packages (M6, `GetAIPackageDone` stays 0), sound/music/voice (M6;
+  `Say` shows its subtitle, `SayDone` is 1), combat/crime/jail, equipment
+  and soul gems (M5), spawning (`PlaceAtPC`…), locks. Dialogue functions
+  that depend on them read the true current state (no weather, no combat
+  targets, nothing equipped).
+* Persuasion and services (barter, training, travel, spells) arrive with
+  the M5 menus; the inventory/stats/magic tabs join the SELECT menu then.
+* The journal topic list does not refine "exhausted" topics by the links in
+  their answers (OpenMW does); heard answers are simply greyed.
+
+### Still not verified
+1. Nothing has run on a PSP or in PPSSPP. The UI's GE path (`ui_gu.c`:
+   T4 font texture + CLUT, 2D sprites, state hand-back to `gfx.c`) is only
+   compiled; the layout itself is verified by the host rasteriser.
+2. Retail data untested: the compiler and dialogue filter follow OpenMW's
+   rules, but the real 3 000+ scripts and ~30 000 infos have not been
+   compiled here. `rpg_report.json` lists every script error, and
+   `rpg/core` falls back to the script region if the DB region is full.
 
 ## Milestone 3 — delivered
 

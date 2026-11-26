@@ -16,6 +16,8 @@ import dmcommon  # noqa: E402
 import dmesh  # noqa: E402
 import anim_demaker  # noqa: E402
 import dzone  # noqa: E402
+import mwscript  # noqa: E402
+import rpg_compiler  # noqa: E402
 import tex_demaker  # noqa: E402
 
 
@@ -124,6 +126,8 @@ class LayoutContractTests(unittest.TestCase):
         "DMeshCollision": dmesh.SIZES["collision"],
         **dzone.SIZES,
         **anim_demaker.SIZES,
+        **rpg_compiler.SIZES,
+        "DRpgSnippet": struct.calcsize(mwscript.SNIPPET_HEADER_FMT),
     }
 
     def test_sizes_match_c_header(self):
@@ -137,6 +141,32 @@ class LayoutContractTests(unittest.TestCase):
 
     def test_dtex_header_prefix(self):
         self.assertEqual(struct.calcsize(tex_demaker.DTEX_HEADER_FMT), 24)
+
+    def test_bytecode_opcodes_match(self):
+        with open(os.path.join(REPO, "src", "fmt.h"), encoding="utf-8") as f:
+            text = f.read()
+        for cname, value in (("MWBC_RET", mwscript.OP_RET), ("MWBC_PUSHS", mwscript.OP_PUSHS),
+                             ("MWBC_LOADM", mwscript.OP_LOADM), ("MWBC_STORED", mwscript.OP_STORED),
+                             ("MWBC_DIVF", mwscript.OP_DIVF), ("MWBC_CMPI", mwscript.OP_CMPI),
+                             ("MWBC_CMPF", mwscript.OP_CMPF), ("MWBC_JZ", mwscript.OP_JZ),
+                             ("MWBC_CALLX", mwscript.OP_CALLX), ("MWBC_MSGBOX", mwscript.OP_MSGBOX),
+                             ("MWBC_OP_COUNT", mwscript.OP_COUNT), ("DRPG_CF_GLOBAL", rpg_compiler.CF_GLOBAL),
+                             ("DRPG_CF_NOT_LOCAL", rpg_compiler.CF_NOT_LOCAL),
+                             ("DRPG_CF_ACTOR", rpg_compiler.CF_ACTOR), ("DRPG_CF_CELL", rpg_compiler.CF_CELL),
+                             ("DRPG_SF_ONACTIVATE", mwscript.SF_ONACTIVATE)):
+            m = re.search(r"\b" + cname + r"\s*=\s*(0x[0-9A-Fa-f]+|\d+|1 << \d+)", text)
+            self.assertIsNotNone(m, cname)
+            raw = m.group(1)
+            got = 1 << int(raw.split("<<")[1]) if "<<" in raw else int(raw, 0)
+            self.assertEqual(got, value, cname)
+        for name, ot in rpg_compiler.OT.items():
+            cname = "DRPG_OT_" + name.rstrip("_")
+            self.assertRegex(text, r"\b" + cname + r"\b", cname)
+        order = re.search(r"enum \{\s*DRPG_OT_NPC = 0,([^}]*)\}", text).group(1)
+        names = ["NPC"] + [n.strip().replace("DRPG_OT_", "") for n in order.replace("\n", " ").split(",")
+                           if n.strip()]
+        self.assertEqual(names[:len(rpg_compiler.OBJ_TYPES)],
+                         [t.rstrip("_") for t in rpg_compiler.OBJ_TYPES])
 
     def test_enum_values_match(self):
         with open(os.path.join(REPO, "src", "fmt.h"), encoding="utf-8") as f:

@@ -124,3 +124,57 @@ with the `x`-prefixed `.kf`; race skin parts are chosen by race and sex
 (female NPCs fall back to male parts), head and hair come from the NPC
 record. Creatures use the `x`-prefixed variant of their model and `.kf`
 when present.
+
+## DRPG — RPG database (`rpg.dpak`)
+
+| Entry | Contents |
+|---|---|
+| `rpg/core` | resident tables (below), loaded into the DB region |
+| `text/<n>` | raw DEFLATE block (~32 KB inflated) of NUL-terminated texts and result-script blobs |
+| `script/<id>` | compiled script: `code[code_size]` + string pool |
+
+A *blob id* is `block << 16 | offset` into an inflated text block.
+
+`rpg/core` starts with `DRpgHeader` (`{ofs, count}` per table, all 16-byte
+aligned) followed by:
+
+| Table | Notes |
+|---|---|
+| objects | `DRpgObject` sorted by id hash: type, name, script, flags (unique, female, key, scroll…), icon/model hashes, weight, value, three type-specific links, two list ranges, six type-specific stats (see `fmt.h`) |
+| actors | `DRpgActor`: level, dynamics, gold, soul, attributes, creature attacks, skills, disposition, reputation, rank, AI settings, services |
+| lists | `{id hash, count}`: inventories, spell lists, leveled-list entries |
+| effects | `DRpgEffect`: effect, skill, attribute, range, area, duration, magnitude |
+| spells | `DRpgSpell` (SPEL and ENCH) sorted by hash |
+| factions / reactions | rank names, favoured attributes/skills, rank requirements, reactions |
+| globals | `{hash, type, initial value}` sorted by hash — the bytecode global index |
+| gmsts | `{hash, type, value}` (string values are name-pool offsets) |
+| scripts / vars | locals counts, flags (`OnActivate` used…), local variable table sorted by hash (`{hash, type, slot}`) |
+| starts | start-script indices (SSCR) |
+| topics | `DRpgTopic` sorted by name (Greeting order); a second uint32 index sorted by hash |
+| infos | `DRpgInfo` per topic in merged load order: text/script blob ids, voice hash, condition range, quest flags, disposition or journal index |
+| conds | `DRpgCond {func, comp, is_float, key, value}` — header filters (100–109) first, then SCVR functions (0–73) and variable kinds (74–84) |
+| blocks | `{pak entry hash, inflated size, packed size}` |
+| names | NUL-terminated name pool (offset 0 = "") |
+
+Dialogue result scripts are `DRpgSnippet {flags, code_size, strings_size}`
++ code + strings inside a text block.
+
+### MWScript bytecode
+
+Typed stack machine (int32/float slots, types resolved at compile time).
+Locals are slots `[shorts…, longs…, floats…]`; strings are pool offsets.
+
+| Op | Operands | Effect |
+|---|---|---|
+| `PUSHI8/16/32`, `PUSHF`, `PUSHS` | literal / pool offset | push |
+| `LOADL`, `STOREL_S/L/F` | u16 slot | local (short stores truncate to 16 bits) |
+| `LOADG`, `STOREG_S/L/F` | u16 global index | global |
+| `LOADM`, `STOREM` | u32 ref hash, u16 slot, u8 flags | `ref.var` (bit 0: global script, bits 1–2: type) |
+| `LOADD`, `STORED` | u32 name hash | speaker local by name (result scripts), as float |
+| `I2F`, `F2I`, `NEG*`, `ADD/SUB/MUL/DIV` I/F, `CMPI/CMPF`+cc | — | arithmetic, comparisons push 0/1 |
+| `JMP`, `JZ` | s16 relative | control flow |
+| `CALL`, `CALLX` | u16 verb, u8 argc [, u32 ref hash] | instruction/function (functions push a result) |
+| `MSGBOX` | u16 fmt, u8 nargs, u8 nbuttons, types[], u16 buttons[] | message box |
+| `POP`, `RET` | — | |
+
+Verb ids are indices into `mwsig.py`'s alphabetical table (`src/mwfuncs.h`).

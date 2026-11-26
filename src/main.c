@@ -24,6 +24,7 @@
 #include "gfx.h"
 #include "mem.h"
 #include "selftest.h"
+#include "ui.h"
 #include "zone.h"
 
 PSP_MODULE_INFO("pspwind", PSP_MODULE_USER, 0, 3);
@@ -124,11 +125,14 @@ static int run_selftests(void)
 /* ------------------------------------------------------------------------ */
 /* app state                                                                */
 /* ------------------------------------------------------------------------ */
-enum { MENU_RESUME, MENU_SCHEME, MENU_INVERT, MENU_CULL, MENU_OVERLAY, MENU_QUIT, MENU_COUNT };
+enum { MENU_RESUME, MENU_SCHEME, MENU_INVERT, MENU_CULL, MENU_OVERLAY, MENU_FLY, MENU_QUIT, MENU_COUNT };
 
 typedef struct {
     World world;
     Game game;
+    GameRpg rpg;
+    Ui ui;
+    UiCanvas canvas;
     GfxOptions opt;
     GfxStats stats;
     int overlay;
@@ -147,16 +151,19 @@ static void hud(void *user)
     const Game *g = &a->game;
     const char *label = game_target_label(g);
     static const char *cull_names[] = { "CW", "CCW", "off" };
+    int windowed = ui_active(&a->ui);
     pspDebugScreenEnableBackColor(0);
     pspDebugScreenSetTextColor(0xFFFFFFFF);
-    pspDebugScreenSetXY(29, 16);
-    pspDebugScreenPrintf("+");
-    if (label && !a->paused) {
+    if (!windowed) {
+        pspDebugScreenSetXY(29, 16);
+        pspDebugScreenPrintf("+");
+    }
+    if (label && !a->paused && !windowed) {
         pspDebugScreenSetTextColor(0xFF80E0FF);
         pspDebugScreenSetXY(34 - (int)(strlen(label) + 4) / 2, 19);
         pspDebugScreenPrintf("[R] %.40s", label);
     }
-    if (g->message_time > 0.0f) {
+    if (g->message_time > 0.0f && !windowed) {
         pspDebugScreenSetTextColor(0xFFC0F0C0);
         pspDebugScreenSetXY(1, 31);
         pspDebugScreenPrintf("%.66s", g->message);
@@ -192,7 +199,7 @@ static void hud(void *user)
     }
     if (a->paused) {
         static const char *items[MENU_COUNT] = { "Resume", "Controls", "Invert look", "Face culling",
-                                                 "Debug overlay", "Quit" };
+                                                 "Debug overlay", "Fly (debug)", "Quit" };
         int i;
         pspDebugScreenSetTextColor(0xFFFFFFFF);
         pspDebugScreenSetXY(26, 9);
@@ -208,6 +215,8 @@ static void hud(void *user)
                 snprintf(value, sizeof(value), "%s", cull_names[a->opt.cull_mode]);
             else if (i == MENU_OVERLAY)
                 snprintf(value, sizeof(value), "%s", a->overlay ? "on" : "off");
+            else if (i == MENU_FLY)
+                snprintf(value, sizeof(value), "%s", g->flying ? "on" : "off");
             pspDebugScreenSetTextColor(i == a->menu ? 0xFF40E0FF : 0xFFB0B0B0);
             pspDebugScreenSetXY(20, 11 + i);
             pspDebugScreenPrintf("%c %-14s %s", i == a->menu ? '>' : ' ', items[i], value);
@@ -287,6 +296,9 @@ static int pause_menu(App *a, const InputState *in)
         case MENU_OVERLAY:
             a->overlay = !a->overlay;
             break;
+        case MENU_FLY:
+            game_set_flying(g, !g->flying);
+            break;
         case MENU_QUIT:
             return 1;
         default:
@@ -335,6 +347,9 @@ static void run(App *a, const char *data_dir)
     gfx_init();
     gfx_default_options(&a->opt);
     game_init(&a->game, &a->world);
+    if (game_attach_rpg(&a->game, &a->rpg, data_dir, err, sizeof(err)) != 0)
+        snprintf(a->error, sizeof(a->error), "no RPG data (%.80s)", err);
+    ui_init(&a->ui, &a->game);
     zi = world_find_exterior(&a->world, -2, -9); /* Seyda Neen with retail data */
     if (zi < 0)
         zi = world_find_exterior(&a->world, 0, 0);
@@ -366,11 +381,15 @@ static void run(App *a, const char *data_dir)
         if (a->paused) {
             if (pause_menu(a, &in))
                 break;
-        } else if (in.pressed & GB_START) {
+        } else if ((in.pressed & GB_START) && !ui_active(&a->ui)) {
             a->paused = 1;
             a->menu = MENU_RESUME;
         } else if (a->game.zone.hdr) {
-            game_update(&a->game, &in, dt);
+            InputState none;
+            memset(&none, 0, sizeof(none));
+            /* open windows own the input; the world pauses but scripts run */
+            game_update(&a->game, ui_active(&a->ui) ? &none : &in, dt);
+            ui_update(&a->ui, &in, dt);
             if (a->game.request.pending) {
                 ZoneRequest r = a->game.request;
                 enter_zone(a, r.zone, r.has_pos ? r.pos : NULL, r.has_pos ? r.rot : NULL);
@@ -383,6 +402,8 @@ static void run(App *a, const char *data_dir)
             game_camera(&a->game, &cam);
             gfx_draw_zone(&a->game.zone, &a->game.actors, &cam, &a->opt, &a->stats);
         }
+        ui_draw(&a->ui, &a->canvas);
+        ui_render_gu(&a->canvas);
         gfx_end_frame(hud, a);
 
         frames++;

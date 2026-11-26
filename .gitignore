@@ -8,6 +8,8 @@ PARAM.SFO
 tests/host/host_tests
 tests/host/world_test
 tests/host/game_test
+tests/host/rpg_test
+tests/host/ui_test
 
 # Python
 __pycache__/

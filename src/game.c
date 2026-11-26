@@ -41,9 +41,21 @@ void game_init(Game *g, World *w)
     game_default_controls(&g->controls);
 }
 
+void game_set_flying(Game *g, int on)
+{
+    g->flying = on;
+    g->body.noclip = (uint8_t)on;
+    g->body.vel.z = 0.0f;
+    game_message(g, on ? "Fly mode (debug)" : "Walking mode");
+}
+
 void game_message(Game *g, const char *text)
 {
-    snprintf(g->message, sizeof(g->message), "%s", text);
+    size_t n = strlen(text);
+    if (n >= sizeof(g->message))
+        n = sizeof(g->message) - 1;
+    memcpy(g->message, text, n);
+    g->message[n] = '\0';
     g->message_time = 3.0f;
 }
 
@@ -58,6 +70,84 @@ void game_camera(const Game *g, Camera *cam)
     cam->yaw = g->yaw;
     cam->pitch = g->pitch;
     cam->fov_y = 60.0f * PW_DEG2RAD;
+}
+
+/* ------------------------------------------------------------------------ */
+/* RPG layer binding                                                        */
+/* ------------------------------------------------------------------------ */
+static uint32_t instance_key(const Game *g, uint32_t inst)
+{
+    const DZoneInstance *in = &g->zone.instances[inst];
+    return vm_reference_key(&g->rpg->vm, in->object_hash, g->zone_hash, in->refnum);
+}
+
+VmRef game_instance_ref(const Game *g, uint32_t inst)
+{
+    VmRef r;
+    memset(&r, 0, sizeof(r));
+    r.vmi = -1;
+    r.inst = -1;
+    if (!g->rpg || !g->zone.hdr || inst >= g->zone.hdr->instance_count)
+        return r;
+    r.kind = VM_REF_OBJECT;
+    r.inst = (int32_t)inst;
+    r.object = g->zone.instances[inst].object_hash;
+    r.key = instance_key(g, inst);
+    r.vmi = g->inst_vmi ? g->inst_vmi[inst] : -1;
+    return r;
+}
+
+static void bind_scripts(Game *g)
+{
+    uint32_t i;
+    for (i = 0; i < g->zone.hdr->instance_count; ++i)
+        g->inst_vmi[i] = -1;
+    if (!g->rpg)
+        return;
+    vm_unload_zone(&g->rpg->vm);
+    for (i = 0; i < g->zone.hdr->instance_count; ++i) {
+        const DZoneInstance *in = &g->zone.instances[i];
+        uint32_t key = instance_key(g, i);
+        g->inst_vmi[i] = (int16_t)vm_bind_reference(&g->rpg->vm, key, in->object_hash, (int32_t)i);
+        g->zone.inst_hidden[i] = (uint8_t)vm_disabled(&g->rpg->vm, key);
+    }
+    g->cell_changed = 2;
+}
+
+const char *game_instance_name(const Game *g, uint32_t inst)
+{
+    const DRpgObject *o;
+    if (!g->rpg || !g->zone.hdr || inst >= g->zone.hdr->instance_count)
+        return "";
+    o = rpgdb_object(&g->rpg->db, g->zone.instances[inst].object_hash);
+    return o ? rpgdb_name(&g->rpg->db, o->name) : "";
+}
+
+const char *game_cell_name(const Game *g)
+{
+    const DZoneHeader *h = g->zone.hdr;
+    uint32_t i;
+    int cx, cy;
+    if (!h)
+        return "";
+    if (h->kind != DZONE_KIND_EXTERIOR)
+        return g->zone.name ? g->zone.name : "";
+    cx = (int)floorf(g->body.pos.x / 8192.0f);
+    cy = (int)floorf(g->body.pos.y / 8192.0f);
+    for (i = 0; i < h->cell_count; ++i) {
+        const DZoneCell *c = &g->zone.cells[i];
+        if (c->x != cx || c->y != cy)
+            continue;
+        if (g->zone.strings[c->name_ofs])
+            return g->zone.strings + c->name_ofs;
+        if (g->rpg && c->region_hash) {
+            const DRpgObject *r = rpgdb_object(&g->rpg->db, c->region_hash);
+            if (r)
+                return rpgdb_name(&g->rpg->db, r->name);
+        }
+        break;
+    }
+    return "Wilderness";
 }
 
 int game_enter_zone(Game *g, uint32_t zone, const float *pos, const float *rot, char *err,
@@ -94,6 +184,15 @@ int game_enter_zone(Game *g, uint32_t zone, const float *pos, const float *rot, 
             d->angle = d->target = 0.0f;
         }
     }
+
+    g->zone_hash = g->world->zone_list[zone].entry_hash;
+    g->inst_vmi = (int16_t *)mem_try_alloc(MEM_REGION_ZONE,
+                                           (g->zone.hdr->instance_count + 1u) * sizeof(int16_t), 4);
+    if (!g->inst_vmi) {
+        snprintf(err, errlen, "out of zone memory for script bindings");
+        return -1;
+    }
+    bind_scripts(g);
 
     if (pos) {
         feet = vec4(pos[0], pos[1], pos[2], 1.0f);
@@ -159,7 +258,7 @@ static uint32_t find_target(Game *g)
         const DZoneInstance *in = &z->instances[i];
         Vec4 c;
         float t, r;
-        if (!activatable(in))
+        if (!activatable(in) || z->inst_hidden[i])
             continue;
         c = vec4(in->bound[0], in->bound[1], in->bound[2], 1.0f);
         r = in->bound[3] * 0.8f; /* bound spheres are generous */
@@ -187,6 +286,11 @@ const char *game_target_label(const Game *g)
     if (g->target == GAME_NO_TARGET || !g->zone.hdr)
         return NULL;
     in = &g->zone.instances[g->target];
+    if (g->rpg && !(in->kind == DZONE_INST_DOOR && in->door != DZONE_NONE)) {
+        const char *name = game_instance_name(g, g->target);
+        if (*name)
+            return name;
+    }
     if (in->kind == DZONE_INST_DOOR && in->door != DZONE_NONE) {
         const DZoneDoor *d = &g->zone.doors[in->door];
         if (d->dest_zone != DZONE_NO_ZONE)
@@ -195,9 +299,47 @@ const char *game_target_label(const Game *g)
     return in->kind < PW_COUNTOF(names) ? names[in->kind] : "Use";
 }
 
-static void activate(Game *g, uint32_t inst)
+static int find_actor(const Game *g, uint32_t inst)
+{
+    uint32_t i;
+    for (i = 0; i < g->actors.count; ++i)
+        if (g->actors.list[i].instance == inst)
+            return (int)i;
+    return -1;
+}
+
+void game_take(Game *g, uint32_t inst)
+{
+    char buf[96];
+    const char *name = game_instance_name(g, inst);
+    if (!g->rpg || inst >= g->zone.hdr->instance_count || g->zone.inst_hidden[inst])
+        return;
+    {
+        VmRef ref = game_instance_ref(g, inst);
+        Vm *vm = &g->rpg->vm;
+        vm_item_add(vm, vm->player_hash, ref.object, 1);
+        vm_set_prop_key(vm, ref.key, MWP_DISABLED, 1.0f);
+        g->zone.inst_hidden[inst] = 1;
+    }
+    snprintf(buf, sizeof(buf), "Taken: %s", *name ? name : "item");
+    game_message(g, buf);
+    if (g->target == inst)
+        g->target = GAME_NO_TARGET;
+}
+
+static void start_dialogue(Game *g, uint32_t inst)
+{
+    VmRef ref = game_instance_ref(g, inst);
+    if (dlg_start(&g->rpg->dlg, &ref, game_instance_name(g, inst)))
+        g->ui_event = GAME_UI_DIALOGUE;
+}
+
+/* The engine's default action for an object (also what a script's
+ * "Activate" performs). */
+static void default_activate(Game *g, uint32_t inst)
 {
     const DZoneInstance *in = &g->zone.instances[inst];
+    const DRpgObject *o = g->rpg ? rpgdb_object(&g->rpg->db, in->object_hash) : NULL;
     uint32_t i;
     if (in->kind == DZONE_INST_DOOR) {
         if (in->door != DZONE_NONE) {
@@ -227,19 +369,286 @@ static void activate(Game *g, uint32_t inst)
     }
     switch (in->kind) {
     case DZONE_INST_NPC:
-        game_message(g, "Dialogue arrives in Milestone 4.");
+    case DZONE_INST_CREATURE:
+        if (g->rpg)
+            start_dialogue(g, inst);
+        else
+            game_message(g, "Dialogue needs rpg.dpak (run rpg_compiler).");
         break;
     case DZONE_INST_CONTAINER:
         game_message(g, "Containers open in Milestone 5.");
         break;
     case DZONE_INST_ITEM:
     case DZONE_INST_LIGHT:
-        game_message(g, "Inventory arrives in Milestone 5.");
+        if (!g->rpg) {
+            game_message(g, "Items need rpg.dpak (run rpg_compiler).");
+        } else if (o && o->type == DRPG_OT_BOOK) {
+            g->ui_event = GAME_UI_BOOK;
+            g->ui_object = in->object_hash;
+            g->ui_instance = inst;
+        } else if (in->kind == DZONE_INST_LIGHT && !(o && (o->flags & DRPG_OF_CARRY))) {
+            game_message(g, "Nothing happens.");
+        } else {
+            game_take(g, inst);
+        }
         break;
     default:
         game_message(g, "Nothing happens.");
         break;
     }
+}
+
+static void activate(Game *g, uint32_t inst)
+{
+    if (g->rpg) {
+        VmRef ref = game_instance_ref(g, inst);
+        /* scripted objects with OnActivate decide themselves (they call
+         * Activate for the default action) */
+        if (vm_activate(&g->rpg->vm, &ref))
+            return;
+    }
+    default_activate(g, inst);
+}
+
+/* ------------------------------------------------------------------------ */
+/* VM host: world verbs                                                     */
+/* ------------------------------------------------------------------------ */
+static int ref_position(const Game *g, const VmRef *r, float out[3], float *zrot)
+{
+    if (r->kind == VM_REF_PLAYER) {
+        out[0] = g->body.pos.x;
+        out[1] = g->body.pos.y;
+        out[2] = g->body.pos.z;
+        *zrot = g->yaw;
+        return 1;
+    }
+    if (r->kind == VM_REF_OBJECT && r->inst >= 0 && (uint32_t)r->inst < g->zone.hdr->instance_count) {
+        int a = find_actor(g, (uint32_t)r->inst);
+        if (a >= 0) {
+            out[0] = g->actors.list[a].pos.x;
+            out[1] = g->actors.list[a].pos.y;
+            out[2] = g->actors.list[a].pos.z;
+            *zrot = g->actors.list[a].yaw;
+        } else {
+            const DZoneInstance *in = &g->zone.instances[r->inst];
+            out[0] = in->pos[0];
+            out[1] = in->pos[1];
+            out[2] = in->pos[2];
+            *zrot = in->rot[2];
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static int set_ref_position(Game *g, const VmRef *r, const float p[3], float zrot, int set_rot)
+{
+    if (r->kind == VM_REF_PLAYER) {
+        g->body.pos.x = p[0];
+        g->body.pos.y = p[1];
+        g->body.pos.z = p[2];
+        g->body.vel.z = 0.0f;
+        if (set_rot)
+            g->yaw = pw_wrap_angle(zrot);
+        return 1;
+    }
+    if (r->kind == VM_REF_OBJECT && r->inst >= 0 && (uint32_t)r->inst < g->zone.hdr->instance_count) {
+        int a = find_actor(g, (uint32_t)r->inst);
+        if (a >= 0) {
+            Vec4 pos = vec4(p[0], p[1], p[2], 1.0f);
+            actor_set_placement(&g->actors.list[a], &pos, set_rot ? zrot : g->actors.list[a].yaw);
+        } else {
+            /* moves the drawn model; static collision stays where it was cooked */
+            DZoneInstance *in = (DZoneInstance *)&g->zone.instances[r->inst];
+            memcpy(in->pos, p, sizeof(in->pos));
+            if (set_rot)
+                in->rot[2] = zrot;
+            zone_placement_matrix(&g->zone.inst_world[r->inst], in->pos, in->rot, in->scale);
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static int axis_of(const VmCtx *ctx, VmValue v)
+{
+    const char *s = vm_arg_string(ctx, v);
+    int c = s[0] | 0x20;
+    return c == 'x' ? 0 : c == 'y' ? 1 : c == 'z' ? 2 : -1;
+}
+
+static int host_call(void *user, Vm *vm, uint16_t func, const VmRef *ref, const VmCtx *ctx,
+                     const VmValue *args, int argc, VmValue *ret)
+{
+    Game *g = (Game *)user;
+    float p[3], q[3], zr, zr2;
+    PW_UNUSED(vm);
+    if (!g->zone.hdr)
+        return 0;
+    switch (func) {
+    case MWF_ACTIVATE:
+        if (ref->kind == VM_REF_OBJECT && ref->inst >= 0)
+            default_activate(g, (uint32_t)ref->inst);
+        return 1;
+    case MWF_GETDISTANCE: {
+        VmRef other = vm_resolve(&g->rpg->vm, pw_hash_name(vm_arg_string(ctx, args[0])));
+        if (ref_position(g, ref, p, &zr) && ref_position(g, &other, q, &zr2)) {
+            float dx = p[0] - q[0], dy = p[1] - q[1], dz = p[2] - q[2];
+            ret->f = sqrtf(dx * dx + dy * dy + dz * dz);
+        } else {
+            ret->f = 1.0e6f;
+        }
+        return 1;
+    }
+    case MWF_GETPOS:
+    case MWF_GETANGLE: {
+        int axis = axis_of(ctx, args[0]);
+        if (axis < 0 || !ref_position(g, ref, p, &zr)) {
+            ret->f = 0.0f;
+            return 1;
+        }
+        if (func == MWF_GETPOS)
+            ret->f = p[axis];
+        else
+            ret->f = axis == 2 ? zr * (180.0f / 3.14159265f) : 0.0f;
+        return 1;
+    }
+    case MWF_SETPOS:
+    case MWF_SETANGLE: {
+        int axis = axis_of(ctx, args[0]);
+        if (axis < 0 || !ref_position(g, ref, p, &zr))
+            return 1;
+        if (func == MWF_SETPOS) {
+            p[axis] = args[1].f;
+            set_ref_position(g, ref, p, zr, 0);
+        } else if (axis == 2) {
+            set_ref_position(g, ref, p, args[1].f * (3.14159265f / 180.0f), 1);
+        }
+        return 1;
+    }
+    case MWF_POSITION:
+        if (argc >= 4) {
+            p[0] = args[0].f;
+            p[1] = args[1].f;
+            p[2] = args[2].f;
+            set_ref_position(g, ref, p, args[3].f * (3.14159265f / 180.0f), 1);
+        }
+        return 1;
+    case MWF_POSITIONCELL:
+        if (argc >= 5 && ref->kind == VM_REF_PLAYER) {
+            int zi = world_find_interior(g->world, pw_hash_name(vm_arg_string(ctx, args[4])));
+            if (zi < 0)
+                zi = world_find_exterior(g->world, (int)floorf(args[0].f / 8192.0f),
+                                         (int)floorf(args[1].f / 8192.0f));
+            if (zi >= 0) {
+                g->request.pending = 1;
+                g->request.zone = (uint32_t)zi;
+                g->request.has_pos = 1;
+                g->request.pos[0] = args[0].f;
+                g->request.pos[1] = args[1].f;
+                g->request.pos[2] = args[2].f;
+                g->request.rot[0] = g->request.rot[1] = 0.0f;
+                g->request.rot[2] = args[3].f * (3.14159265f / 180.0f);
+            }
+            return 1;
+        }
+        return 0;
+    case MWF_CELLCHANGED:
+        ret->i = g->cell_changed > 0;
+        return 1;
+    case MWF_GETINTERIOR:
+        ret->i = g->zone.hdr->kind != DZONE_KIND_EXTERIOR;
+        return 1;
+    case MWF_GETPCRUNNING:
+        ret->i = g->running && !g->sneaking;
+        return 1;
+    case MWF_GETPCSNEAKING:
+        ret->i = g->sneaking;
+        return 1;
+    case MWF_GETPCJUMPING:
+        ret->i = !g->body.on_ground && !g->body.swimming && !g->flying;
+        return 1;
+    case MWF_GETPCSLEEP:
+        ret->i = 0;
+        return 1;
+    case MWF_GETPLAYERCONTROLSDISABLED:
+        ret->i = g->controls_disabled;
+        return 1;
+    case MWF_DISABLEPLAYERCONTROLS:
+    case MWF_ENABLEPLAYERCONTROLS:
+        g->controls_disabled = func == MWF_DISABLEPLAYERCONTROLS;
+        return 1;
+    case MWF_PLAYGROUP:
+    case MWF_LOOPGROUP:
+        if (ref->kind == VM_REF_OBJECT && ref->inst >= 0) {
+            int a = find_actor(g, (uint32_t)ref->inst);
+            if (a >= 0) {
+                actor_play(&g->actors.list[a], pw_hash_name(vm_arg_string(ctx, args[0])),
+                           func == MWF_LOOPGROUP);
+                return 1;
+            }
+        }
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+static int host_find_ref(void *user, uint32_t object_hash, VmRef *out)
+{
+    Game *g = (Game *)user;
+    uint32_t i;
+    if (!g->zone.hdr)
+        return 0;
+    for (i = 0; i < g->zone.hdr->instance_count; ++i) {
+        if (g->zone.instances[i].object_hash == object_hash) {
+            *out = game_instance_ref(g, i);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static const char *host_cell_name(void *user)
+{
+    return game_cell_name((const Game *)user);
+}
+
+static int host_interior(void *user)
+{
+    const Game *g = (const Game *)user;
+    return g->zone.hdr && g->zone.hdr->kind != DZONE_KIND_EXTERIOR;
+}
+
+static void host_set_disabled(void *user, const VmRef *ref, int disabled)
+{
+    Game *g = (Game *)user;
+    if (g->zone.hdr && ref->inst >= 0 && (uint32_t)ref->inst < g->zone.hdr->instance_count)
+        g->zone.inst_hidden[ref->inst] = (uint8_t)(disabled != 0);
+}
+
+int game_attach_rpg(Game *g, GameRpg *rpg, const char *data_dir, char *err, uint32_t errlen)
+{
+    char path[256];
+    VmHost host;
+    snprintf(path, sizeof(path), "%s/rpg.dpak", data_dir);
+    if (rpgdb_open(&rpg->db, path, err, errlen) != 0)
+        return -1;
+    memset(&host, 0, sizeof(host));
+    host.user = g;
+    host.call = host_call;
+    host.find_ref = host_find_ref;
+    host.cell_name = host_cell_name;
+    host.interior = host_interior;
+    host.set_disabled = host_set_disabled;
+    if (vm_init(&rpg->vm, &rpg->db, &host) != 0 || dlg_init(&rpg->dlg, &rpg->vm, &rpg->db) != 0) {
+        snprintf(err, errlen, "out of script memory");
+        return -1;
+    }
+    g->rpg = rpg;
+    if (g->zone.hdr)
+        bind_scripts(g);
+    return 0;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -355,6 +764,24 @@ static void check_zone_border(Game *g)
     g->request.rot[2] = g->yaw;
 }
 
+static void rpg_tick(Game *g, float dt)
+{
+    Vm *vm;
+    if (!g->rpg)
+        return;
+    vm = &g->rpg->vm;
+    vm->menu_mode = g->menu_mode;
+    vm_tick(vm, dt);
+    if (g->cell_changed > 0)
+        g->cell_changed--;
+    if (vm->has_force_greeting) {
+        VmRef r = vm->force_greeting;
+        vm->has_force_greeting = 0;
+        if (!g->rpg->dlg.active && r.inst >= 0 && g->ui_event == GAME_UI_NONE)
+            start_dialogue(g, (uint32_t)r.inst);
+    }
+}
+
 void game_update(Game *g, const InputState *in, float dt)
 {
     const Controls *c = &g->controls;
@@ -368,6 +795,19 @@ void game_update(Game *g, const InputState *in, float dt)
     g->time += dt;
     if (g->message_time > 0.0f)
         g->message_time -= dt;
+    if (g->menu_mode) {
+        /* menus pause the world; scripts keep running and see MenuMode */
+        rpg_tick(g, dt);
+        return;
+    }
+    if (g->controls_disabled) {
+        InputState *mut = &g->frozen_input;
+        memset(mut, 0, sizeof(*mut));
+        mut->pressed = in->pressed & GB_R;
+        in = mut;
+        pressed = in->pressed;
+        held = 0;
+    }
 
     /* ---- input mapping */
     if (c->scheme == CONTROL_SCHEME_A) {
@@ -395,12 +835,6 @@ void game_update(Game *g, const InputState *in, float dt)
         g->sneaking = !g->sneaking;
         g->body.height = g->sneaking ? SNEAK_HEIGHT : BODY_HEIGHT;
         game_message(g, g->sneaking ? "Sneaking" : "Standing");
-    }
-    if (pressed & GB_SELECT) {
-        g->flying = !g->flying;
-        g->body.noclip = (uint8_t)g->flying;
-        g->body.vel.z = 0.0f;
-        game_message(g, g->flying ? "Fly mode (debug)" : "Walking mode");
     }
     if (pressed & GB_LEFT)
         cycle_nearest_animation(g, -1);
@@ -443,5 +877,6 @@ void game_update(Game *g, const InputState *in, float dt)
         if (g->target != GAME_NO_TARGET)
             activate(g, g->target);
     }
+    rpg_tick(g, dt);
     check_zone_border(g);
 }

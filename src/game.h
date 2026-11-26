@@ -11,7 +11,7 @@
  *   square / circle  turn left / right     R  activate (doors, objects)
  *   L  jump        D-pad up  run/walk      D-pad down  sneak
  *   D-pad left/right  cycle the animation of the nearest actor (debug)
- *   SELECT  fly mode (debug noclip)        START  pause menu (platform)
+ *   SELECT  journal menu (ui.c)            START  pause menu (fly mode, options)
  * Scheme B swaps the roles: analog looks, face buttons walk.
  */
 #ifndef PSPWIND_GAME_H
@@ -19,6 +19,9 @@
 
 #include "actor.h"
 #include "common.h"
+#include "dialogue.h"
+#include "rpgdb.h"
+#include "vm.h"
 #include "gfx.h"
 #include "phys.h"
 #include "zone.h"
@@ -58,6 +61,16 @@ typedef struct {
     float rot[3];
 } ZoneRequest;
 
+/* RPG layer: database, script VM and dialogue (rpg.dpak). */
+typedef struct {
+    RpgDb db;
+    Vm vm;
+    Dialogue dlg;
+} GameRpg;
+
+/* requests for the UI layer */
+enum { GAME_UI_NONE = 0, GAME_UI_DIALOGUE, GAME_UI_BOOK };
+
 typedef struct {
     World *world;
     Zone zone;
@@ -75,6 +88,17 @@ typedef struct {
     float message_time;
     float time;
     uint32_t zone_loads;
+    /* RPG layer (NULL when rpg.dpak is absent: exploration only) */
+    GameRpg *rpg;
+    uint32_t zone_hash;     /* pack entry hash of the loaded zone (reference keys) */
+    int16_t *inst_vmi;      /* per instance: script instance or -1 */
+    int menu_mode;          /* set by the UI: world paused, MenuMode == 1 */
+    int controls_disabled;  /* DisablePlayerControls */
+    int cell_changed;       /* CellChanged stays true for the first frames */
+    int ui_event;           /* GAME_UI_* for the UI layer */
+    uint32_t ui_object;     /* book object hash for GAME_UI_BOOK */
+    uint32_t ui_instance;   /* its instance */
+    InputState frozen_input;
 } Game;
 
 #define GAME_NO_TARGET 0xFFFFFFFFu
@@ -87,9 +111,20 @@ void game_default_controls(Controls *c);
  * pos is the feet position, rot the Morrowind euler rotation). */
 int game_enter_zone(Game *g, uint32_t zone, const float *pos, const float *rot, char *err,
                     uint32_t errlen);
+/* Opens <data_dir>/rpg.dpak and starts a new game (scripts, dialogue). */
+int game_attach_rpg(Game *g, GameRpg *rpg, const char *data_dir, char *err, uint32_t errlen);
 void game_update(Game *g, const InputState *in, float dt);
+/* Script reference of a zone instance. */
+VmRef game_instance_ref(const Game *g, uint32_t inst);
+/* Picks an item instance up into the player's inventory. */
+void game_take(Game *g, uint32_t inst);
+/* Display name of the player's cell (interior name, exterior cell or region). */
+const char *game_cell_name(const Game *g);
+/* Record display name of an instance ("" when unknown). */
+const char *game_instance_name(const Game *g, uint32_t inst);
 void game_camera(const Game *g, Camera *cam);
 const char *game_target_label(const Game *g);
 void game_message(Game *g, const char *text);
+void game_set_flying(Game *g, int on);
 
 #endif /* PSPWIND_GAME_H */

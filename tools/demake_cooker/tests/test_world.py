@@ -186,7 +186,9 @@ class TestWorldTests(unittest.TestCase):
         self.assertTrue(cellar["flags"] & dzone.F_WATER)
         self.assertAlmostEqual(cellar["water_height"], -150.0)
         self.assertLess(cellar["fog_far"], 5000.0)
-        coin = [i for i in cellar["instances"] if i["kind"] == dzone.INST_ITEM]
+        items = [i for i in cellar["instances"] if i["kind"] == dzone.INST_ITEM]
+        self.assertEqual(len(items), 3)  # coin, ring, book
+        coin = [i for i in items if i["object_hash"] == dmcommon.fnv1a32("tw_coin")]
         self.assertEqual(len(coin), 1)
         self.assertFalse(coin[0]["flags"] & dzone.IF_PERSISTENT)  # after NAM0
         self.assertTrue(set(self.manifest["textures"]) >= {"tx_tw_grass", "water/water00"})

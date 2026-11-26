@@ -441,6 +441,8 @@ static void visit(PhysWorld *pw, float xmin, float xmax, float ymin, float ymax,
                     pw->stamp[ti] = s;
                     if (t->xmax < xmin || t->xmin > xmax || t->ymax < ymin || t->ymin > ymax)
                         continue;
+                    if (pw->zone->inst_hidden && pw->zone->inst_hidden[t->inst])
+                        continue;
                     fn(pw, (float (*)[3])t->v, t->n, t->inst, user);
                 }
             }
@@ -450,6 +452,8 @@ static void visit(PhysWorld *pw, float xmin, float xmax, float ymin, float ymax,
         for (i = 0; i < pw->dyn_count; ++i) {
             const PhysDynamic *d = &pw->dyn[i];
             const Mat4 *m = &pw->zone->inst_world[d->inst];
+            if (pw->zone->inst_hidden && pw->zone->inst_hidden[d->inst])
+                continue;
             Vec4 c = vec4(d->bound[0], d->bound[1], d->bound[2], 1.0f), wc;
             float r = d->bound[3] * pw->zone->instances[d->inst].scale;
             mat4_transform_point(&wc, m, &c);

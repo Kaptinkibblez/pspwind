@@ -28,12 +28,22 @@ src/                     PSP runtime (C99)
   anim.c/.h              fixed-rate animation clips (sampling, groups, looping)
   actor.c/.h             segmented rigid-limb NPCs/creatures: binding + posing
   phys.c/.h              collision grid, cylinder-vs-triangle movement, gravity, swimming
-  game.c/.h              player controller, activation, doors, zone transitions (portable)
+  game.c/.h              player controller, activation, doors, zone transitions, VM host (portable)
+  inflate.c/.h           raw DEFLATE decoder for the text blocks
+  rpgdb.c/.h             rpg.dpak: validated tables, text-block LRU cache, script paging
+  vm.c/.h                MWScript bytecode VM + scripted state (journal, stats, inventories)
+  mwfuncs.c/.h           generated MWScript verb ids/signatures (gen_mwfuncs.py)
+  dialogue.c/.h          info filtering, greetings, topics, choices, hyperlinks
+  ui.c/.h, ui_gu.c       8x8-font console UI: dialogue, journal, books, message boxes
+  font8x8.h              MSX 8x8 font (PSPSDK)
   selftest.c/.h          allocator + VFPU-vs-scalar test suite (host and device)
   main.c                 boot, PSP input, pause menu, HUD, frame loop
 tests/host/              native build of the portable runtime code + test runner
 tools/demake_cooker/     Python 3 + Pillow offline cooker
-  cook_all.py            runs the whole pipeline (meshes -> world -> textures)
+  cook_all.py            runs the whole pipeline (meshes -> anims -> world -> rpg -> textures)
+  rpg_compiler.py        ESM records -> rpg.dpak (dialogue, journal, scripts, items, spells...)
+  mwscript.py            MWScript compiler -> bytecode (+ disassembler)
+  mwsig.py               MWScript verb signatures; gen_mwfuncs.py writes src/mwfuncs.h
   tex_demaker.py         textures -> DTEX (T4/T8, swizzled) + icon atlases
   mesh_demaker.py        NIF -> DMESH (decimated, segmented skins, collision)
   anim_demaker.py        KF -> DANIM (text-key groups, 15 fps, root motion -> speed)
@@ -87,7 +97,10 @@ runs the shared self-test suite; `tools-test` runs the cooker unit tests;
 `world-test` cooks the synthetic test world, loads every zone through the
 real C loader (plus validator fuzzing) and plays it through `game.c` with
 scripted input (walking, collision, jumping, doors, swimming, zone borders,
-NPC animation). None of them needs the PSP toolchain.
+NPC animation), runs the RPG layer on the cooked `rpg.dpak` (`rpg_test`:
+quest via the dialogue engine + bytecode fuzzing) and plays the test quest
+through the UI with button presses (`ui_test`, screenshots in
+`build/host/screens/`). None of them needs the PSP toolchain.
 
 ## Cooking assets
 
@@ -103,9 +116,11 @@ python3 tools/demake_cooker/cook_all.py --data "/path/to/Morrowind/Data Files" -
 Bloodmoon order, loose files overriding archives; ESMs in the same order).
 The pipeline cooks meshes, then animations, then zones (merging small statics
 and assembling NPCs from race body parts using the cooked meshes and clips),
-then only the textures that meshes and zones reference (plus UI art, icons
-and embedded NIF textures). Copy `meshes.dpak`, `anims.dpak`, `textures.dpak`
-and `zones.dpak` to `ms0:/PSP/GAME/pspwind/data/`. Each step also runs on its own
+then the RPG database (`rpg_compiler.py`: dialogue, quests, books, factions,
+items, spells, globals, GMSTs, and every script compiled to bytecode), then
+only the textures that meshes and zones reference (plus UI art, icons and
+embedded NIF textures). Copy `meshes.dpak`, `anims.dpak`, `textures.dpak`,
+`zones.dpak` and `rpg.dpak` to `ms0:/PSP/GAME/pspwind/data/`. Each step also runs on its own
 (`mesh_demaker.py`, `world_demaker.py`, `tex_demaker.py`) with options such as
 `--ratio` (triangle budget, default 0.5), `--zone-size` (cells per zone side,
 default 3), `--merge-max-tris`, `--size`/`--small-size`, `--colors`,
@@ -125,7 +140,8 @@ make package
 ```
 
 Generates an original test world (`make_testworld.py`: hills, a shoreline, a
-hamlet, a cellar behind a door), cooks it, and puts `EBOOT.PBP` plus the
+hamlet, a cellar behind a door, and a small quest — talk to the Hamlet
+Weaver about her lost ring), cooks it, and puts `EBOOT.PBP` plus the
 cooked data in `build/psp/pspwind/` — copy that folder to `ms0:/PSP/GAME/`
 or load the EBOOT in PPSSPP.
 
@@ -144,8 +160,12 @@ looks and the face buttons walk):
 | L | jump |
 | D-pad ↑ / ↓ | run–walk toggle / sneak |
 | D-pad ← / → | cycle the nearest actor's animation (debug) |
-| SELECT | fly mode (debug noclip; R/L = up/down) |
-| START | pause menu: controls A/B, invert look, face culling, debug overlay, quit |
+| SELECT | journal (L/R: Journal, Quests, Topics; ✕ open, ○ back) |
+| START | pause menu: controls A/B, invert look, face culling, debug overlay, fly mode (debug), quit |
+
+In dialogue: ↑/↓ choose a topic, ✕ ask, → jump into the hyperlinks of the
+text (↑/↓ between links, ✕ ask, ← back), L/R scroll, ○ goodbye. Books: ↑/↓
+scroll, □ take, ✕ close. Message boxes: ←/→ and ✕.
 
 Walking off an exterior zone loads the neighbouring zone behind a loading
 card; activating a door with a destination loads the target cell.

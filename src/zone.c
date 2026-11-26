@@ -425,8 +425,11 @@ int zone_load(World *w, Zone *z, uint32_t zi, char *err, uint32_t errlen)
     z->inst_world = (Mat4 *)mem_try_alloc(MEM_REGION_ZONE,
                                           (h->instance_count + 1u) * sizeof(Mat4), 64);
     z->inst_scratch = (uint8_t *)mem_try_alloc(MEM_REGION_ZONE, h->instance_count + 1u, 4);
+    z->inst_hidden = (uint8_t *)mem_try_alloc(MEM_REGION_ZONE, h->instance_count + 1u, 4);
+    if (z->inst_hidden)
+        memset(z->inst_hidden, 0, h->instance_count + 1u);
     z->terrain_scratch = (uint8_t *)mem_try_alloc(MEM_REGION_ZONE, h->terrain_count + 1u, 4);
-    if (!z->tex || !z->batch_model || !z->meshes || !z->inst_world || !z->inst_scratch ||
+    if (!z->tex || !z->batch_model || !z->meshes || !z->inst_world || !z->inst_scratch || !z->inst_hidden ||
         !z->terrain_scratch)
         ZONE_FAIL("zone %u: out of zone memory for tables", (unsigned)zi);
     for (i = 0; i < h->texture_count; ++i)

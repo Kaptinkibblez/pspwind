@@ -54,6 +54,7 @@ typedef struct {
     Mat4 *inst_world;       /* placement per instance */
     const DTexHeader *water_tex; /* NULL: untextured water */
     uint8_t *inst_scratch;       /* per-instance byte for the renderer (visibility) */
+    uint8_t *inst_hidden;        /* per-instance: 1 = disabled by a script / picked up */
     uint8_t *terrain_scratch;    /* per-terrain-patch byte for the renderer */
     const DZoneActor *actor_recs;
     const uint32_t *anim_hashes;

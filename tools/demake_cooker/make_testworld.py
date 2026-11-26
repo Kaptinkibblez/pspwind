@@ -527,6 +527,196 @@ def ref_subs(index: int, oid: str, pos, rot=(0.0, 0.0, 0.0), scale=None, door=No
     return subs
 
 
+# --------------------------------------------------------------- RPG layer
+QUEST = "tw_lostring"
+
+WEAVER_SCRIPT = """Begin tw_weaver_script
+; local state read by the weaver's greetings and result scripts
+short metpc
+short asked
+float idle
+set idle to idle + GetSecondsPassed
+End tw_weaver_script
+"""
+
+RING_SCRIPT = """Begin tw_ring_script
+if ( OnActivate == 1 )
+    if ( tw_ringfound == 0 )
+        set tw_ringfound to 1
+        Journal "tw_lostring" 20
+        MessageBox "The ring glints in the dust."
+    endif
+    Activate
+endif
+End tw_ring_script
+"""
+
+MAIN_SCRIPT = """Begin tw_hamlet_main
+short done
+if ( done == 0 )
+    set done to 1
+    MessageBox "Welcome to the Test Hamlet, %s." "Outlander" "Thanks"
+endif
+if ( GetButtonPressed == 0 )
+    set tw_welcomed to 1
+endif
+End tw_hamlet_main
+"""
+
+
+def script_record(name: str, source: str) -> bytes:
+    loc_counts = {"s": 0, "l": 0, "f": 0}
+    for line in source.splitlines():
+        w = line.split()
+        if len(w) >= 2 and w[0].lower() in ("short", "long", "float"):
+            loc_counts[w[0][0].lower()] += 1
+    schd = name.encode("latin-1").ljust(32, b"\0") + struct.pack(
+        "<5I", loc_counts["s"], loc_counts["l"], loc_counts["f"], 0, 0)
+    return esm.record("SCPT", [esm.sub("SCHD", schd), esm.sub("SCTX", source.encode("latin-1"))])
+
+
+def dial(name: str, dtype: int) -> bytes:
+    return esm.record("DIAL", [esm.sub("NAME", esm.zs(name)), esm.sub("DATA", bytes([dtype]))])
+
+
+def infos(topic: str, entries) -> List[bytes]:
+    """entries: dicts with text and optional actor/disp/selects/script/quest."""
+    out = []
+    ids = [f"{topic.replace(' ', '_')}_{i}" for i in range(len(entries))]
+    for i, e in enumerate(entries):
+        subs = [esm.sub("INAM", esm.zs(ids[i])),
+                esm.sub("PNAM", esm.zs(ids[i - 1] if i else "")),
+                esm.sub("NNAM", esm.zs(ids[i + 1] if i + 1 < len(entries) else "")),
+                esm.sub("DATA", struct.pack("<iibbbb", 0, e.get("disp", 0), e.get("rank", -1),
+                                            e.get("gender", -1), e.get("pcrank", -1), 0))]
+        for key, tag in (("actor", "ONAM"), ("race", "RNAM"), ("class", "CNAM"),
+                         ("faction", "FNAM"), ("cell", "ANAM"), ("pcfaction", "DNAM")):
+            if e.get(key):
+                subs.append(esm.sub(tag, esm.zs(e[key])))
+        subs.append(esm.sub("NAME", e["text"].encode("latin-1")))
+        for rule, value in e.get("selects", ()):
+            subs.append(esm.sub("SCVR", rule.encode("latin-1")))
+            if isinstance(value, float):
+                subs.append(esm.sub("FLTV", struct.pack("<f", value)))
+            else:
+                subs.append(esm.sub("INTV", struct.pack("<i", value)))
+        if e.get("script"):
+            subs.append(esm.sub("BNAM", e["script"].encode("latin-1")))
+        for flag in e.get("quest", ()):
+            subs.append(esm.sub(flag, b"\x01"))
+        out.append(esm.record("INFO", subs))
+    return out
+
+
+def rpg_records() -> List[bytes]:
+    W = "tw_villager_f"
+    E = "tw_villager"
+    recs = [
+        esm.record("GLOB", [esm.sub("NAME", esm.zs("tw_ringfound")), esm.sub("FNAM", b"s"),
+                            esm.sub("FLTV", struct.pack("<f", 0.0))]),
+        esm.record("GLOB", [esm.sub("NAME", esm.zs("tw_welcomed")), esm.sub("FNAM", b"l"),
+                            esm.sub("FLTV", struct.pack("<f", 0.0))]),
+        esm.record("GLOB", [esm.sub("NAME", esm.zs("GameHour")), esm.sub("FNAM", b"f"),
+                            esm.sub("FLTV", struct.pack("<f", 9.0))]),
+        esm.record("GMST", [esm.sub("NAME", esm.zs("sJournalEntry")),
+                            esm.sub("STRV", b"Your journal has been updated.")]),
+        esm.record("GMST", [esm.sub("NAME", esm.zs("iTestValue")), esm.sub("INTV", struct.pack("<i", 7))]),
+        esm.record("GMST", [esm.sub("NAME", esm.zs("fTestValue")), esm.sub("FLTV", struct.pack("<f", 2.5))]),
+        esm.record("CLAS", [esm.sub("NAME", esm.zs("tw_weaver")), esm.sub("FNAM", esm.zs("Weaver")),
+                            esm.sub("CLDT", struct.pack("<15i", 4, 6, 2, 9, 24, 16, 25, 8, 22, 18, 19,
+                                                        20, 21, 1, 0))]),
+        esm.record("CLAS", [esm.sub("NAME", esm.zs("tw_elder")), esm.sub("FNAM", esm.zs("Elder")),
+                            esm.sub("CLDT", struct.pack("<15i", 1, 2, 0, 9, 24, 16, 25, 8, 22, 18, 19,
+                                                        20, 21, 1, 0))]),
+        esm.record("FACT", [esm.sub("NAME", esm.zs("tw_weavers")),
+                            esm.sub("FNAM", esm.zs("Weavers' Circle"))]
+                   + [esm.sub("RNAM", r.encode("latin-1").ljust(32, b"\0"))
+                      for r in ("Novice", "Spinner", "Weaver", "Master Weaver")]
+                   + [esm.sub("FADT", struct.pack("<2i50i7ii", 4, 6, *([30, 30, 10, 5, 0] * 10),
+                                                  9, 24, 16, -1, -1, -1, -1, 0)),
+                      esm.sub("ANAM", esm.zs("tw_weavers")), esm.sub("INTV", struct.pack("<i", 2))]),
+        obj("MISC", "tw_ring", "tw\\crate.nif", "Weaver's Ring",
+            extra=[esm.sub("MCDT", struct.pack("<fii", 0.1, 120, 0)), esm.sub("SCRI", esm.zs("tw_ring_script")),
+                   esm.sub("ITEX", esm.zs("m\\tw_ring.tga"))]),
+        obj("MISC", "Gold_001", "tw\\crate.nif", "Gold", extra=[esm.sub("MCDT", struct.pack("<fii", 0.0, 1, 0))]),
+        obj("BOOK", "tw_book_history", "tw\\crate.nif", "A History of the Hamlet",
+            extra=[esm.sub("BKDT", struct.pack("<fiiii", 1.0, 15, 0, -1, 0)),
+                   esm.sub("TEXT", b'<DIV ALIGN="CENTER">A History of the Hamlet<BR>\r\n<BR>\r\n'
+                                   b'<DIV ALIGN="LEFT">The hamlet was founded by weavers.<BR>\r\n'
+                                   b'They came for the reeds &amp; the quiet.<P>The end.')]),
+        obj("WEAP", "tw_dagger", "tw\\crate.nif", "Hamlet Dagger",
+            extra=[esm.sub("WPDT", struct.pack("<fihHffH6Bi", 3.0, 10, 0, 300, 2.5, 1.0, 50,
+                                               2, 6, 3, 7, 4, 8, 0)),
+                   esm.sub("ENAM", esm.zs("tw_spark_en"))]),
+        esm.record("SPEL", [esm.sub("NAME", esm.zs("tw_spark")), esm.sub("FNAM", esm.zs("Spark")),
+                            esm.sub("SPDT", struct.pack("<iii", 0, 5, 0)),
+                            esm.sub("ENAM", struct.pack("<hbbiiiii", 14, -1, -1, 2, 0, 1, 5, 10))]),
+        esm.record("ENCH", [esm.sub("NAME", esm.zs("tw_spark_en")),
+                            esm.sub("ENDT", struct.pack("<iiii", 2, 10, 100, 0)),
+                            esm.sub("ENAM", struct.pack("<hbbiiiii", 14, -1, -1, 1, 0, 1, 2, 4))]),
+        esm.record("SSCR", [esm.sub("DATA", b"0000000001"), esm.sub("NAME", esm.zs("tw_hamlet_main"))]),
+        script_record("tw_weaver_script", WEAVER_SCRIPT),
+        script_record("tw_ring_script", RING_SCRIPT),
+        script_record("tw_hamlet_main", MAIN_SCRIPT),
+        esm.record("NPC_", [esm.sub("NAME", esm.zs("player")), esm.sub("FNAM", esm.zs("player")),
+                            esm.sub("RNAM", esm.zs("tw_folk")), esm.sub("CNAM", esm.zs("tw_elder")),
+                            esm.sub("NPDT", struct.pack("<h8B27BBHHHBBbBi", 1, *([40] * 8), *([15] * 27),
+                                                        0, 50, 40, 60, 50, 0, -1, 0, 0)),
+                            esm.sub("FLAG", struct.pack("<i", 0))]),
+    ]
+    recs.append(dial("Greeting 0", 2))
+    recs += infos("Greeting 0", [
+        {"actor": W, "text": "Oh! A stranger. I'm the hamlet weaver. Have you heard about my lost ring?",
+         "selects": [("03sX0metpc", 0)], "script": "set metpc to 1\nAddTopic \"lost ring\""},
+    ])
+    recs.append(dial("Greeting 1", 2))
+    recs += infos("Greeting 1", [
+        {"actor": E, "text": "Welcome to the hamlet, %PCName. Ask me about the latest rumors."},
+        {"actor": W, "text": "Hello again, %PCName. The %Class of the %Faction greets you."},
+    ])
+    recs.append(dial("latest rumors", 0))
+    recs += infos("latest rumors", [
+        {"actor": E, "selects": [("04JX3" + QUEST, 100)],
+         "text": "The weaver is happy again. You did well."},
+        {"text": "They say the weaver lost something precious. Ask her about her lost ring."},
+    ])
+    recs.append(dial("lost ring", 0))
+    recs += infos("lost ring", [
+        {"actor": W, "selects": [("01500", 1)], "text": "Thank you, %PCRace. Search the cellar.",
+         "script": "Journal \"tw_lostring\" 10\nset asked to 1"},
+        {"actor": W, "selects": [("01500", 2)], "text": "Pity. Leave me be, then.",
+         "script": "Goodbye"},
+        {"actor": W, "selects": [("04JX4" + QUEST, 10)],
+         "text": "My ring! I dropped it somewhere in the cellar. Will you find it for me?",
+         "script": "Choice \"I will find it.\" 1 \"Not now.\" 2"},
+        {"actor": W, "selects": [("04JX4" + QUEST, 100), ("05IX0tw_ring", 0)],
+         "text": "Have you found my ring yet?"},
+        {"actor": W, "selects": [("04JX4" + QUEST, 100), ("05IX3tw_ring", 1)],
+         "text": "You found it! Here, take this gold.",
+         "script": "player->RemoveItem \"tw_ring\" 1\nplayer->AddItem \"Gold_001\" 50\n"
+                   "Journal \"tw_lostring\" 100\nset metpc to 2\nModDisposition 20"},
+        {"actor": W, "text": "Thank you again for finding my ring."},
+    ])
+    recs.append(dial("little secret", 0))
+    recs += infos("little secret", [
+        {"actor": W, "disp": 55, "text": "The reeds by the shore make the finest thread. Tell no one."},
+    ])
+    recs.append(dial("Info Refusal", 0))
+    recs += infos("Info Refusal", [
+        {"text": "I don't know you well enough to talk about that."},
+    ])
+    recs.append(dial(QUEST, 4))
+    recs += infos(QUEST, [
+        {"text": "The Weaver's Lost Ring", "quest": ("QSTN",)},
+        {"disp": 10, "text": "The Hamlet Weaver lost her ring somewhere in the cellar. I promised to find it."},
+        {"disp": 20, "text": "I found a ring in the cellar. It must be the weaver's."},
+        {"disp": 100, "text": "I returned the ring to the Hamlet Weaver. She rewarded me with 50 gold.",
+         "quest": ("QSTF",)},
+    ])
+    recs += [script_record("tw_unused_broken", "Begin tw_unused_broken\nset nothing to 1\nif ( 1 == 1 )\nEnd")]
+    return recs
+
+
 def build_esm() -> List[bytes]:
     rng = random.Random(1234)
     recs = [
@@ -559,12 +749,21 @@ def build_esm() -> List[bytes]:
             esm.sub("NAME", esm.zs(bid)), esm.sub("MODL", esm.zs(key.replace("/", "\\") + ".nif")),
             esm.sub("FNAM", esm.zs("tw_folk")),
             esm.sub("BYDT", bytes((part, 0, 1 if female else 0, 0)))]))
-    for nid, name, female in (("tw_villager", "Hamlet Elder", False),
-                              ("tw_villager_f", "Hamlet Weaver", True)):
-        recs.append(esm.record("NPC_", [
-            esm.sub("NAME", esm.zs(nid)), esm.sub("FNAM", esm.zs(name)),
-            esm.sub("RNAM", esm.zs("tw_folk")), esm.sub("BNAM", esm.zs("tw_folk_head")),
-            esm.sub("NPDT", bytes(12)), esm.sub("FLAG", struct.pack("<i", 1 if female else 0))]))
+    for nid, name, female, cls, fac, disp, script in (
+            ("tw_villager", "Hamlet Elder", False, "tw_elder", "", 50, ""),
+            ("tw_villager_f", "Hamlet Weaver", True, "tw_weaver", "tw_weavers", 40, "tw_weaver_script")):
+        subs = [esm.sub("NAME", esm.zs(nid)), esm.sub("FNAM", esm.zs(name)),
+                esm.sub("RNAM", esm.zs("tw_folk")), esm.sub("CNAM", esm.zs(cls)),
+                esm.sub("BNAM", esm.zs("tw_folk_head")),
+                esm.sub("NPDT", struct.pack("<hBBbxxxi", 3, disp, 5, 2 if fac else 0, 25)),
+                esm.sub("FLAG", struct.pack("<i", 1 if female else 0))]
+        if fac:
+            subs.append(esm.sub("ANAM", esm.zs(fac)))
+        if script:
+            subs.append(esm.sub("SCRI", esm.zs(script)))
+        subs.append(esm.sub("NPCO", struct.pack("<i", 2) + esm.zs("tw_coin").ljust(32, b"\0")))
+        recs.append(esm.record("NPC_", subs))
+    recs += rpg_records()
     house_pos = (1200.0, 900.0, terrain_height(1200.0, 900.0))
     door_out = (house_pos[0], house_pos[1] - 206.0, house_pos[2])  # door sits at wall y - 6
     index = 1
@@ -617,6 +816,10 @@ def build_esm() -> List[bytes]:
     index += 1
     cellar += [esm.sub("NAM0", struct.pack("<I", 1))]
     cellar += ref_subs(index, "tw_coin", (-200.0, 250.0, 0.0))
+    index += 1
+    cellar += ref_subs(index, "tw_ring", (150.0, -200.0, 0.0), (0.0, 0.0, 0.0), scale=0.25)
+    index += 1
+    cellar += ref_subs(index, "tw_book_history", (-300.0, -250.0, 0.0), (0.0, 0.0, 0.0), scale=0.3)
     index += 1
     recs.append(esm.record("CELL", cellar))
     return recs

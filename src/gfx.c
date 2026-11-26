@@ -596,7 +596,7 @@ void gfx_draw_zone(const Zone *z, const ActorSet *actors, const Camera *cam,
     /* instance visibility once per frame */
     for (i = 0; i < h->instance_count; ++i) {
         float d;
-        inst_visible[i] = (uint8_t)(zone_instance_mesh(z, i) &&
+        inst_visible[i] = (uint8_t)(!z->inst_hidden[i] && zone_instance_mesh(z, i) &&
                                     visible(&frustum, cam, z->instances[i].bound, fog_far, &d));
         if (!inst_visible[i])
             stats->culled++;
@@ -663,7 +663,7 @@ void gfx_draw_zone(const Zone *z, const ActorSet *actors, const Camera *cam,
             const Actor *a = &actors->list[i];
             float bnd[4], d;
             uint32_t p;
-            if (!a->posed)
+            if (!a->posed || z->inst_hidden[a->instance])
                 continue;
             bnd[0] = a->pos.x;
             bnd[1] = a->pos.y;

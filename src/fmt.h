@@ -551,6 +551,295 @@ typedef struct {
     uint32_t reserved;
 } DAnimGroup;
 
+
+/* ---------------------------------------------------------------- DRPG ---
+ * rpg.dpak: "rpg/core" (resident tables below), "text/<n>" (raw DEFLATE
+ * blocks of NUL-terminated text and dialogue result-script blobs; a blob id
+ * is block << 16 | offset) and "script/<id>" (bytecode + string pool).
+ * All tables are 16-byte aligned inside the core; hashes are pw_hash_name()
+ * of the lower-case record id. */
+#define DRPG_VERSION 1
+#define DRPG_NONE 0xFFFFFFFFu
+#define DRPG_NONE16 0xFFFFu
+
+typedef struct { uint32_t ofs, count; } DRpgTable;
+
+typedef struct {
+    char magic[4];         /* "DRPG" */
+    uint16_t version;
+    uint16_t flags;
+    uint32_t player;       /* object index of the "player" NPC or DRPG_NONE */
+    uint32_t names_ofs, names_size; /* NUL-terminated name pool, ofs 0 = "" */
+    DRpgTable objects;     /* DRpgObject, sorted by hash */
+    DRpgTable actors;      /* DRpgActor */
+    DRpgTable lists;       /* DRpgListItem */
+    DRpgTable effects;     /* DRpgEffect */
+    DRpgTable spells;      /* DRpgSpell (SPEL + ENCH), sorted by hash */
+    DRpgTable factions;    /* DRpgFaction, sorted by hash */
+    DRpgTable reactions;   /* DRpgReaction */
+    DRpgTable globals;     /* DRpgGlobal, sorted by hash = bytecode index */
+    DRpgTable gmsts;       /* DRpgGmst, sorted by hash */
+    DRpgTable scripts;     /* DRpgScript, sorted by hash */
+    DRpgTable vars;        /* DRpgVar, per script sorted by hash */
+    DRpgTable starts;      /* uint16 script indices (SSCR) */
+    DRpgTable topics;      /* DRpgTopic, sorted by name (case-insensitive) */
+    DRpgTable infos;       /* DRpgInfo, grouped per topic in load order */
+    DRpgTable conds;       /* DRpgCond */
+    DRpgTable blocks;      /* DRpgBlock: text/<i> */
+    uint32_t topic_hash_ofs; /* uint32 topic indices sorted by topic hash */
+    uint32_t file_size;
+    uint32_t reserved;
+} DRpgHeader;
+
+enum {
+    DRPG_OT_NPC = 0, DRPG_OT_CREA, DRPG_OT_WEAP, DRPG_OT_ARMO, DRPG_OT_CLOT, DRPG_OT_BOOK,
+    DRPG_OT_ALCH, DRPG_OT_INGR, DRPG_OT_MISC, DRPG_OT_APPA, DRPG_OT_LOCK, DRPG_OT_PROB,
+    DRPG_OT_REPA, DRPG_OT_LIGH, DRPG_OT_CONT, DRPG_OT_LEVI, DRPG_OT_LEVC, DRPG_OT_DOOR,
+    DRPG_OT_ACTI, DRPG_OT_STAT, DRPG_OT_CLAS, DRPG_OT_RACE, DRPG_OT_REGN, DRPG_OT_COUNT
+};
+
+enum {
+    DRPG_OF_UNIQUE = 1 << 0,   /* exactly one placed reference */
+    DRPG_OF_FEMALE = 1 << 1,
+    DRPG_OF_ESSENTIAL = 1 << 2,
+    DRPG_OF_AUTOCALC = 1 << 3,
+    DRPG_OF_KEY = 1 << 4,
+    DRPG_OF_SCROLL = 1 << 5,
+    DRPG_OF_CARRY = 1 << 6,
+    DRPG_OF_ORGANIC = 1 << 7,
+    DRPG_OF_RESPAWN = 1 << 8,
+    DRPG_OF_PLAYABLE = 1 << 9,
+    DRPG_OF_BEAST = 1 << 10,
+    DRPG_OF_ALL_LEVELS = 1 << 11,
+    DRPG_OF_EACH = 1 << 12,
+    DRPG_OF_AUTOCALC_ITEM = 1 << 13
+};
+
+/* Type specific fields (see docs/FORMATS.md):
+ *   NPC_  link = race, class, faction; stat[0] = actor; list = inventory,
+ *         list2 = spells
+ *   CREA  stat[0] = actor, stat[1] = creature type, stat[2] = flags
+ *   WEAP  link[0] = enchantment, link[1] = chop/slash min,max bytes,
+ *         link[2] = thrust min,max; stat = type, health, speed (float bits),
+ *         reach (float bits), enchant points, flags
+ *   ARMO  link[0] = ench; stat = type, health, enchant points, rating
+ *   CLOT  link[0] = ench; stat[0] = type, stat[2] = enchant points
+ *   BOOK  link[0] = ench, link[1] = text blob; stat[0] = skill, [2] = ench pts
+ *   ALCH/INGR  list2 = DRpgEffect range
+ *   LOCK/PROB/REPA  stat[0] = uses, stat[1] = quality (float bits)
+ *   APPA  stat[0] = type, stat[1] = quality; LIGH stat = time, radius,
+ *         colour, flags; CONT stat[0] = capacity (float bits), list = items
+ *   LEVI/LEVC  list = {id, level}, stat[0] = chance none
+ *   CLAS  stat[0] = attr0 | attr1 << 8 | specialisation << 16,
+ *         stat[1..3] = 10 skill bytes (minor, major pairs), stat[4] = services
+ *   RACE  stat[0..3] = height m/f, weight m/f (float bits) */
+typedef struct {
+    uint32_t hash;
+    uint32_t name;       /* name pool offset or DRPG_NONE */
+    uint8_t type;        /* DRPG_OT_* */
+    uint8_t sex;         /* NPC: 1 = female */
+    uint16_t script;     /* script index or DRPG_NONE16 */
+    uint32_t flags;      /* DRPG_OF_* */
+    uint32_t icon;       /* pw_hash_name(icon key) or 0 */
+    uint32_t model;      /* pw_hash_name(mesh key) or 0 */
+    float weight;
+    int32_t value;
+    uint32_t link[3];
+    uint16_t list_count, list2_count;
+    uint32_t list_first, list2_first;
+    int32_t stat[6];
+} DRpgObject;
+
+typedef struct {
+    int16_t level;
+    uint16_t health, magicka, fatigue;
+    int32_t gold;
+    int32_t soul;
+    uint16_t attributes[8];
+    uint16_t attack[6];    /* creatures: min, max x 3 */
+    uint8_t skills[27];    /* NPC skills; creatures: combat, magic, stealth */
+    uint8_t disposition, reputation;
+    int8_t rank;
+    uint8_t hello, fight, flee, alarm;
+    uint8_t pad[2];
+    uint32_t services;
+} DRpgActor;
+
+typedef struct { uint32_t hash; int32_t count; } DRpgListItem;
+
+typedef struct {
+    int16_t effect;
+    int8_t skill, attribute;
+    uint8_t range, pad;
+    uint16_t area, duration, mag_min, mag_max;
+    uint16_t pad2;
+} DRpgEffect;
+
+typedef struct {
+    uint32_t hash;
+    uint32_t name;
+    uint8_t kind;          /* 0 spell, 1 enchantment */
+    uint8_t type;
+    uint16_t flags;
+    int32_t cost;
+    int32_t charge;
+    uint32_t effect_first;
+    uint16_t effect_count;
+    uint16_t pad;
+    uint32_t reserved;
+} DRpgSpell;
+
+typedef struct {
+    uint32_t hash;
+    uint32_t name;
+    uint32_t rank_name[10];   /* name pool offsets or DRPG_NONE */
+    int8_t attribute[2];
+    int8_t skill[7];
+    uint8_t hidden;
+    uint16_t reaction_count;
+    uint32_t reaction_first;
+    int16_t rank_req[10][5];  /* attribute1, attribute2, skill1, skill2, reputation */
+} DRpgFaction;
+
+typedef struct { uint32_t faction; int32_t value; } DRpgReaction;
+
+enum { DRPG_VT_SHORT = 0, DRPG_VT_LONG = 1, DRPG_VT_FLOAT = 2 };
+enum { DRPG_GMST_INT = 0, DRPG_GMST_FLOAT = 1, DRPG_GMST_STRING = 2 };
+
+typedef struct {
+    uint32_t hash;
+    uint8_t type;          /* DRPG_VT_* */
+    uint8_t pad[3];
+    uint32_t value;        /* int32 or float bits */
+} DRpgGlobal;
+
+typedef struct {
+    uint32_t hash;
+    uint8_t type;          /* DRPG_GMST_* */
+    uint8_t pad[3];
+    uint32_t value;        /* int32, float bits or name pool offset */
+} DRpgGmst;
+
+enum { DRPG_SF_ONACTIVATE = 1 << 0, DRPG_SF_DYNAMIC = 1 << 1 };
+
+typedef struct {
+    uint32_t hash;
+    uint32_t name;
+    uint16_t num_shorts, num_longs, num_floats;
+    uint16_t flags;        /* DRPG_SF_* */
+    uint32_t var_first;
+    uint16_t var_count;
+    uint16_t pad;
+    uint32_t code_size;    /* "script/<id>" = code[code_size] + strings */
+    uint32_t strings_size;
+} DRpgScript;
+
+typedef struct {
+    uint32_t hash;
+    uint8_t type;          /* DRPG_VT_* */
+    uint8_t pad;
+    uint16_t slot;         /* locals are [shorts..., longs..., floats...] */
+} DRpgVar;
+
+enum { DRPG_TT_TOPIC = 0, DRPG_TT_VOICE, DRPG_TT_GREETING, DRPG_TT_PERSUASION, DRPG_TT_JOURNAL };
+
+typedef struct {
+    uint32_t hash;
+    uint32_t name;
+    uint8_t type;          /* DRPG_TT_* */
+    uint8_t flags;
+    uint8_t pad[2];
+    uint32_t info_first;
+    uint32_t info_count;
+} DRpgTopic;
+
+enum {
+    DRPG_IF_QUEST_NAME = 1 << 0,
+    DRPG_IF_QUEST_FINISHED = 1 << 1,
+    DRPG_IF_QUEST_RESTART = 1 << 2,
+    DRPG_IF_HAS_ACTOR = 1 << 3
+};
+
+typedef struct {
+    uint32_t text;         /* blob id of the NUL-terminated response */
+    uint32_t script;       /* blob id of the result script or DRPG_NONE */
+    uint32_t sound;        /* pw_hash_name(voice file) or 0 */
+    uint32_t cond_first;
+    uint16_t cond_count;
+    uint8_t flags;         /* DRPG_IF_* */
+    int8_t pad;
+    int32_t data;          /* minimum disposition, or the journal index */
+} DRpgInfo;
+
+/* Condition functions: 0..73 are the dialogue SCVR functions (RankLow ...
+ * PcWerewolfKills, in the original order), then: */
+enum {
+    DRPG_CF_GLOBAL = 74, DRPG_CF_LOCAL = 75, DRPG_CF_JOURNAL = 76, DRPG_CF_ITEM = 77,
+    DRPG_CF_DEAD = 78, DRPG_CF_NOT_ID = 79, DRPG_CF_NOT_FACTION = 80, DRPG_CF_NOT_CLASS = 81,
+    DRPG_CF_NOT_RACE = 82, DRPG_CF_NOT_CELL = 83, DRPG_CF_NOT_LOCAL = 84,
+    /* INFO header filters, always first in an info's list */
+    DRPG_CF_ACTOR = 100, DRPG_CF_RACE = 101, DRPG_CF_CLASS = 102, DRPG_CF_FACTION = 103,
+    DRPG_CF_FACTIONLESS = 104, DRPG_CF_RANK = 105, DRPG_CF_GENDER = 106, DRPG_CF_PCFACTION = 107,
+    DRPG_CF_PCRANK = 108, DRPG_CF_CELL = 109
+};
+enum { DRPG_CMP_EQ = 0, DRPG_CMP_NE, DRPG_CMP_GT, DRPG_CMP_GE, DRPG_CMP_LT, DRPG_CMP_LE };
+
+typedef struct {
+    uint8_t func;          /* DRPG_CF_* or SCVR function */
+    uint8_t comp;          /* DRPG_CMP_* */
+    uint8_t is_float;      /* value is float bits */
+    uint8_t pad;
+    uint32_t key;          /* id/variable hash; name pool offset for cells */
+    int32_t value;         /* compared value; rank for faction filters */
+} DRpgCond;
+
+typedef struct {
+    uint32_t entry_hash;   /* pw_hash_name("text/<i>") */
+    uint32_t raw_size;
+    uint32_t packed_size;
+    uint32_t reserved;
+} DRpgBlock;
+
+/* Dialogue result-script blob (inside a text block). */
+typedef struct {
+    uint16_t flags;
+    uint16_t pad;
+    uint32_t code_size;
+    uint32_t strings_size;
+} DRpgSnippet;
+
+/* MWScript bytecode opcodes (tools/demake_cooker/mwscript.py). Operands are
+ * little endian and unaligned. */
+enum {
+    MWBC_RET = 0x00,      /* end of program */
+    MWBC_PUSHI8 = 0x01,   /* s8 */
+    MWBC_PUSHI16 = 0x02,  /* s16 */
+    MWBC_PUSHI32 = 0x03,  /* s32 */
+    MWBC_PUSHF = 0x04,    /* f32 */
+    MWBC_PUSHS = 0x05,    /* u16 string pool offset */
+    MWBC_LOADL = 0x06,    /* u16 slot */
+    MWBC_STOREL_S = 0x07, MWBC_STOREL_L = 0x08, MWBC_STOREL_F = 0x09,
+    MWBC_LOADG = 0x0A,    /* u16 global index */
+    MWBC_STOREG_S = 0x0B, MWBC_STOREG_L = 0x0C, MWBC_STOREG_F = 0x0D,
+    MWBC_LOADM = 0x0E,    /* u32 ref hash, u16 slot, u8 bit0 global script | type << 1 */
+    MWBC_STOREM = 0x0F,   /* same operands */
+    MWBC_LOADD = 0x10,    /* u32 name hash (speaker local, as float) */
+    MWBC_STORED = 0x11,   /* u32 name hash */
+    MWBC_I2F = 0x12, MWBC_F2I = 0x13, MWBC_NEGI = 0x14, MWBC_NEGF = 0x15,
+    MWBC_ADDI = 0x16, MWBC_SUBI = 0x17, MWBC_MULI = 0x18, MWBC_DIVI = 0x19,
+    MWBC_ADDF = 0x1A, MWBC_SUBF = 0x1B, MWBC_MULF = 0x1C, MWBC_DIVF = 0x1D,
+    MWBC_CMPI = 0x1E,     /* + EQ NE LT LE GT GE */
+    MWBC_CMPF = 0x24,     /* + EQ NE LT LE GT GE */
+    MWBC_JMP = 0x2A,      /* s16 relative to the next instruction */
+    MWBC_JZ = 0x2B,       /* s16, pops an int */
+    MWBC_POP = 0x2C,
+    MWBC_CALL = 0x2D,     /* u16 function, u8 argc */
+    MWBC_CALLX = 0x2E,    /* u16 function, u8 argc, u32 reference hash */
+    MWBC_MSGBOX = 0x2F,   /* u16 fmt, u8 nargs, u8 nbuttons, u8 types[nargs], u16 buttons[] */
+    MWBC_OP_COUNT = 0x30
+};
+enum { MWBC_ARG_INT = 0, MWBC_ARG_FLOAT = 1, MWBC_ARG_STRING = 2 };
+
 /* Layout contract shared with the Python cookers. */
 PW_STATIC_ASSERT(sizeof(DPakHeader) == 32, dpak_header);
 PW_STATIC_ASSERT(sizeof(DPakEntry) == 16, dpak_entry);
@@ -580,5 +869,22 @@ PW_STATIC_ASSERT(sizeof(DAnimHeader) == 48, danim_header);
 PW_STATIC_ASSERT(sizeof(DAnimTrack) == 16, danim_track);
 PW_STATIC_ASSERT(sizeof(DAnimGroup) == 24, danim_group);
 PW_STATIC_ASSERT(sizeof(DZoneActor) == 64, dzone_actor);
+PW_STATIC_ASSERT(sizeof(DRpgHeader) == 160, drpgheader);
+PW_STATIC_ASSERT(sizeof(DRpgObject) == 80, drpgobject);
+PW_STATIC_ASSERT(sizeof(DRpgActor) == 84, drpgactor);
+PW_STATIC_ASSERT(sizeof(DRpgListItem) == 8, drpglistitem);
+PW_STATIC_ASSERT(sizeof(DRpgEffect) == 16, drpgeffect);
+PW_STATIC_ASSERT(sizeof(DRpgSpell) == 32, drpgspell);
+PW_STATIC_ASSERT(sizeof(DRpgFaction) == 164, drpgfaction);
+PW_STATIC_ASSERT(sizeof(DRpgReaction) == 8, drpgreaction);
+PW_STATIC_ASSERT(sizeof(DRpgGlobal) == 12, drpgglobal);
+PW_STATIC_ASSERT(sizeof(DRpgGmst) == 12, drpggmst);
+PW_STATIC_ASSERT(sizeof(DRpgScript) == 32, drpgscript);
+PW_STATIC_ASSERT(sizeof(DRpgVar) == 8, drpgvar);
+PW_STATIC_ASSERT(sizeof(DRpgTopic) == 20, drpgtopic);
+PW_STATIC_ASSERT(sizeof(DRpgInfo) == 24, drpginfo);
+PW_STATIC_ASSERT(sizeof(DRpgCond) == 12, drpgcond);
+PW_STATIC_ASSERT(sizeof(DRpgBlock) == 16, drpgblock);
+PW_STATIC_ASSERT(sizeof(DRpgSnippet) == 12, drpgsnippet);
 
 #endif /* PSPWIND_FMT_H */
