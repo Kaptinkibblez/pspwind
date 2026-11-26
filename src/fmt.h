@@ -558,7 +558,7 @@ typedef struct {
  * is block << 16 | offset) and "script/<id>" (bytecode + string pool).
  * All tables are 16-byte aligned inside the core; hashes are pw_hash_name()
  * of the lower-case record id. */
-#define DRPG_VERSION 1
+#define DRPG_VERSION 2
 #define DRPG_NONE 0xFFFFFFFFu
 #define DRPG_NONE16 0xFFFFu
 
@@ -586,6 +586,11 @@ typedef struct {
     DRpgTable infos;       /* DRpgInfo, grouped per topic in load order */
     DRpgTable conds;       /* DRpgCond */
     DRpgTable blocks;      /* DRpgBlock: text/<i> */
+    DRpgTable skills;      /* DRpgSkill[27], skill index order */
+    DRpgTable mgefs;       /* DRpgMgef[143], magic effect index order */
+    DRpgTable races;       /* DRpgRace, sorted by hash */
+    DRpgTable travel;      /* DRpgTravel (NPC stat[1..2] = first, count) */
+    DRpgTable markers;     /* DRpgMarker (divine / temple intervention) */
     uint32_t topic_hash_ofs; /* uint32 topic indices sorted by topic hash */
     uint32_t file_size;
     uint32_t reserved;
@@ -595,7 +600,8 @@ enum {
     DRPG_OT_NPC = 0, DRPG_OT_CREA, DRPG_OT_WEAP, DRPG_OT_ARMO, DRPG_OT_CLOT, DRPG_OT_BOOK,
     DRPG_OT_ALCH, DRPG_OT_INGR, DRPG_OT_MISC, DRPG_OT_APPA, DRPG_OT_LOCK, DRPG_OT_PROB,
     DRPG_OT_REPA, DRPG_OT_LIGH, DRPG_OT_CONT, DRPG_OT_LEVI, DRPG_OT_LEVC, DRPG_OT_DOOR,
-    DRPG_OT_ACTI, DRPG_OT_STAT, DRPG_OT_CLAS, DRPG_OT_RACE, DRPG_OT_REGN, DRPG_OT_COUNT
+    DRPG_OT_ACTI, DRPG_OT_STAT, DRPG_OT_CLAS, DRPG_OT_RACE, DRPG_OT_REGN, DRPG_OT_BSGN,
+    DRPG_OT_COUNT
 };
 
 enum {
@@ -632,7 +638,9 @@ enum {
  *   LEVI/LEVC  list = {id, level}, stat[0] = chance none
  *   CLAS  stat[0] = attr0 | attr1 << 8 | specialisation << 16,
  *         stat[1..3] = 10 skill bytes (minor, major pairs), stat[4] = services
- *   RACE  stat[0..3] = height m/f, weight m/f (float bits) */
+ *   RACE  stat[0..3] = height m/f, weight m/f (float bits); list2 = powers
+ *   BSGN  link[1] = description blob, list2 = spells, icon = texture
+ *   NPC_  stat[1], stat[2] = travel destination range */
 typedef struct {
     uint32_t hash;
     uint32_t name;       /* name pool offset or DRPG_NONE */
@@ -800,6 +808,63 @@ typedef struct {
     uint32_t reserved;
 } DRpgBlock;
 
+typedef struct {
+    uint32_t name;         /* name pool */
+    uint8_t attribute;     /* governing attribute */
+    uint8_t specialization; /* 0 combat, 1 magic, 2 stealth */
+    uint16_t pad;
+    float use[4];          /* skill gain per use type */
+    uint32_t desc;         /* blob id or DRPG_NONE */
+    uint32_t reserved;
+} DRpgSkill;
+
+enum {
+    DRPG_MF_TARGET_SKILL = 0x1, DRPG_MF_TARGET_ATTRIBUTE = 0x2, DRPG_MF_NO_DURATION = 0x4,
+    DRPG_MF_NO_MAGNITUDE = 0x8, DRPG_MF_HARMFUL = 0x10, DRPG_MF_CAST_SELF = 0x40,
+    DRPG_MF_CAST_TOUCH = 0x80, DRPG_MF_CAST_TARGET = 0x100, DRPG_MF_SPELLMAKING = 0x200,
+    DRPG_MF_ENCHANTING = 0x400, DRPG_MF_APPLIED_ONCE = 0x1000, DRPG_MF_NON_RECASTABLE = 0x4000,
+    DRPG_MF_UNREFLECTABLE = 0x10000, DRPG_MF_CASTER_LINKED = 0x20000
+};
+
+typedef struct {
+    uint32_t name;         /* name pool (GMST sEffect...) */
+    uint32_t flags;        /* DRPG_MF_* (hard-coded flags merged in) */
+    float base_cost;
+    float speed;
+    uint8_t school;        /* 0 alteration .. 5 restoration */
+    uint8_t present;       /* an MGEF record exists */
+    int16_t resisted_by;   /* effect index or -1 */
+    int16_t weakened_by;   /* effect index or -1 */
+    uint16_t pad;
+} DRpgMgef;
+
+typedef struct {
+    uint32_t hash;
+    uint32_t name;
+    int8_t bonus_skill[7];  /* -1 unused */
+    int8_t pad0;
+    uint8_t bonus[7];
+    uint8_t pad1;
+    uint16_t attribute[8][2]; /* male, female */
+    float height[2], weight[2];
+    uint32_t flags;        /* 1 playable, 2 beast */
+    uint32_t desc;         /* blob id or DRPG_NONE */
+} DRpgRace;
+
+typedef struct {
+    float pos[3];
+    float rot_z;
+    uint32_t cell;         /* hash of the lower-case interior name, 0 exterior */
+} DRpgTravel;
+
+typedef struct {
+    float pos[3];
+    float rot_z;
+    uint32_t cell;         /* hash of the lower-case interior name, 0 exterior */
+    uint8_t kind;          /* 0 divine (Imperial cult), 1 temple (Almsivi) */
+    uint8_t pad[3];
+} DRpgMarker;
+
 /* Dialogue result-script blob (inside a text block). */
 typedef struct {
     uint16_t flags;
@@ -869,7 +934,7 @@ PW_STATIC_ASSERT(sizeof(DAnimHeader) == 48, danim_header);
 PW_STATIC_ASSERT(sizeof(DAnimTrack) == 16, danim_track);
 PW_STATIC_ASSERT(sizeof(DAnimGroup) == 24, danim_group);
 PW_STATIC_ASSERT(sizeof(DZoneActor) == 64, dzone_actor);
-PW_STATIC_ASSERT(sizeof(DRpgHeader) == 160, drpgheader);
+PW_STATIC_ASSERT(sizeof(DRpgHeader) == 200, drpgheader);
 PW_STATIC_ASSERT(sizeof(DRpgObject) == 80, drpgobject);
 PW_STATIC_ASSERT(sizeof(DRpgActor) == 84, drpgactor);
 PW_STATIC_ASSERT(sizeof(DRpgListItem) == 8, drpglistitem);
@@ -886,5 +951,10 @@ PW_STATIC_ASSERT(sizeof(DRpgInfo) == 24, drpginfo);
 PW_STATIC_ASSERT(sizeof(DRpgCond) == 12, drpgcond);
 PW_STATIC_ASSERT(sizeof(DRpgBlock) == 16, drpgblock);
 PW_STATIC_ASSERT(sizeof(DRpgSnippet) == 12, drpgsnippet);
+PW_STATIC_ASSERT(sizeof(DRpgSkill) == 32, drpgskill);
+PW_STATIC_ASSERT(sizeof(DRpgMgef) == 24, drpgmgef);
+PW_STATIC_ASSERT(sizeof(DRpgRace) == 80, drpgrace);
+PW_STATIC_ASSERT(sizeof(DRpgTravel) == 20, drpgtravel);
+PW_STATIC_ASSERT(sizeof(DRpgMarker) == 24, drpgmarker);
 
 #endif /* PSPWIND_FMT_H */

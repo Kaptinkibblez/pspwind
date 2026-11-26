@@ -37,17 +37,23 @@ if HERE not in sys.path:
 
 import dmcommon  # noqa: E402
 import esm  # noqa: E402
+import mwdata  # noqa: E402
 import mwscript  # noqa: E402
 from dmcommon import LOG, fnv1a32  # noqa: E402
 
 NONE32 = 0xFFFFFFFF
 NONE16 = 0xFFFF
 DRPG_MAGIC = b"DRPG"
-DRPG_VERSION = 1
+DRPG_VERSION = 2
 TEXT_BLOCK = 32 * 1024
 
 # ------------------------------------------------------------------ layout
-HEADER_FMT = "<4sHHIII" + "II" * 16 + "II4x"   # see DRpgHeader in src/fmt.h
+HEADER_FMT = "<4sHHIII" + "II" * 21 + "III"   # see DRpgHeader in src/fmt.h
+SKILL_FMT = "<IBBH4fII"
+MGEF_FMT = "<IIffBBhhH"
+RACE_FMT = "<II7bx7Bx16H4fII"
+TRAVEL_FMT = "<4fI"
+MARKER_FMT = "<4fIB3x"
 OBJECT_FMT = "<IIBBHIIIfi3IHHII6i"
 ACTOR_FMT = "<hHHHii8H6H27sBBbBBBBxxI"
 LIST_FMT = "<Ii"
@@ -70,12 +76,13 @@ SIZES = {name: struct.calcsize(fmt) for name, fmt in (
     ("DRpgFaction", FACTION_FMT), ("DRpgReaction", REACTION_FMT), ("DRpgGlobal", GLOBAL_FMT),
     ("DRpgGmst", GMST_FMT), ("DRpgScript", SCRIPT_FMT), ("DRpgVar", VAR_FMT),
     ("DRpgTopic", TOPIC_FMT), ("DRpgInfo", INFO_FMT), ("DRpgCond", COND_FMT),
-    ("DRpgBlock", BLOCK_FMT))}
+    ("DRpgBlock", BLOCK_FMT), ("DRpgSkill", SKILL_FMT), ("DRpgMgef", MGEF_FMT),
+    ("DRpgRace", RACE_FMT), ("DRpgTravel", TRAVEL_FMT), ("DRpgMarker", MARKER_FMT))}
 
 # object types (DRpgObject.type)
 OBJ_TYPES = ("NPC_", "CREA", "WEAP", "ARMO", "CLOT", "BOOK", "ALCH", "INGR", "MISC", "APPA",
              "LOCK", "PROB", "REPA", "LIGH", "CONT", "LEVI", "LEVC", "DOOR", "ACTI", "STAT",
-             "CLAS", "RACE", "REGN")
+             "CLAS", "RACE", "REGN", "BSGN")
 OT = {t: i for i, t in enumerate(OBJ_TYPES)}
 ITEM_TYPES = {"WEAP", "ARMO", "CLOT", "BOOK", "ALCH", "INGR", "MISC", "APPA", "LOCK", "PROB",
               "REPA", "LIGH"}
@@ -319,6 +326,9 @@ class GameData:
         self.spells: Dict[str, esm.Record] = {}
         self.enchants: Dict[str, esm.Record] = {}
         self.ref_counts: Dict[str, int] = {}
+        self.skills: Dict[int, esm.Record] = {}
+        self.mgefs: Dict[int, esm.Record] = {}
+        self.markers: List[Tuple[int, float, float, float, float, str]] = []
         self.files: List[str] = []
 
     def load(self, paths: Sequence[str]) -> "GameData":
@@ -398,16 +408,32 @@ class GameData:
                 current["order"].insert(info, deleted)
             elif t == "FACT":
                 self._keyed(self.factions, rec)
+            elif t in ("SKIL", "MGEF"):
+                idx = _i32(rec.get("INDX"), 0, -1)
+                table = self.skills if t == "SKIL" else self.mgefs
+                if 0 <= idx < (27 if t == "SKIL" else len(mwdata.EFFECTS)):
+                    table[idx] = rec
             elif t == "SPEL":
                 self._keyed(self.spells, rec)
             elif t == "ENCH":
                 self._keyed(self.enchants, rec)
             elif t == "CELL":
+                cell_name, interior, ref_id = "", False, None
                 for n, d in rec.subs:
                     if n == "NAME" and self._in_ref:
                         key = zs(d).lower()
                         self.ref_counts[key] = self.ref_counts.get(key, 0) + 1
                         self._in_ref = False
+                        ref_id = key
+                    elif n == "NAME" and ref_id is None:
+                        cell_name = zs(d)
+                    elif n == "DATA" and ref_id is None and len(d) >= 4:
+                        interior = bool(struct.unpack_from("<i", d, 0)[0] & 1)
+                    elif n == "DATA" and ref_id is not None and len(d) >= 24:
+                        if ref_id in (mwdata.DIVINE_MARKER, mwdata.TEMPLE_MARKER):
+                            x, y, z, _rx, _ry, rz = struct.unpack_from("<6f", d, 0)
+                            self.markers.append((0 if ref_id == mwdata.DIVINE_MARKER else 1, x, y, z, rz,
+                                                 cell_name.lower() if interior else ""))
                     elif n == "FRMR":
                         self._in_ref = True
                 self._in_ref = False
@@ -472,6 +498,7 @@ class RpgBuilder:
         self.lists: List[Tuple[int, int]] = []
         self.effects: List[tuple] = []
         self.actors: List[tuple] = []
+        self.travel: List[tuple] = []
         objs = []
         for key, (t, rec) in gd.objects.items():
             objs.append(self._object(key, t, rec))
@@ -535,6 +562,7 @@ class RpgBuilder:
                 flags |= OF_AUTOCALC
             link = [_h(zs(rec.get("RNAM"))), _h(zs(rec.get("CNAM"))), _h(zs(rec.get("ANAM")))]
             stat[0] = self._npc_actor(rec)
+            stat[1], stat[2] = self._travel(rec)
             l1 = self._list(self._inventory(rec))
             l2 = self._list(self._spell_list(rec))
         elif t == "CREA":
@@ -677,10 +705,17 @@ class RpgBuilder:
                     flags |= OF_BEAST
                 hm, hf, wm, wf = struct.unpack_from("<4f", d, 120)
                 stat[:4] = [fbits(hm), fbits(hf), fbits(wm), fbits(wf)]
+            l2 = self._list(self._spell_list(rec))
+        elif t == "BSGN":
+            link[1] = self.blobs.add_text(mwscript.display_text(zs(rec.get("DESC")))) \
+                if rec.get("DESC") else NONE32
+            tex = zs(rec.get("TNAM"))
+            icon = tex or icon
+            l2 = self._list(self._spell_list(rec))
         elif t == "REGN":
             pass
         return (fnv1a32(key), self.names.opt(mwscript.display_text(name)), OT[t], sex, script, flags,
-                _h(icon_key(icon)) if icon else 0, _h(model_key(model)) if model else 0,
+                _h(icon_key(icon) if t != "BSGN" else dmcommon.texture_key(icon)) if icon else 0, _h(model_key(model)) if model else 0,
                 weight, value, link, l1, l2, [s32(v) for v in stat])
 
     def _npc_actor(self, rec: esm.Record) -> int:
@@ -701,9 +736,77 @@ class RpgBuilder:
             level = struct.unpack_from("<h", d, 0)[0]
             disp, rep, rank = d[2], d[3], struct.unpack_from("<b", d, 4)[0]
             gold = struct.unpack_from("<i", d, 8)[0]
+            attrs, skills, health, magicka, fatigue = self.autocalc_npc(rec, level)
         hello, fight, flee, alarm, services = _aidt(rec.get("AIDT"))
+        if len(d) < 52:
+            services |= self.class_services(zs(rec.get("CNAM")))
         return self._actor(level, health, magicka, fatigue, gold, 0, attrs, [0] * 6, skills,
                            disp, rep, rank, hello, fight, flee, alarm, services)
+
+    def _travel(self, rec: esm.Record) -> Tuple[int, int]:
+        first = len(self.travel)
+        pending = None
+        for n, d in rec.subs:
+            if n == "DODT" and len(d) >= 24:
+                if pending is not None:
+                    self.travel.append(pending)
+                x, y, z, _rx, _ry, rz = struct.unpack_from("<6f", d, 0)
+                pending = (x, y, z, rz, 0)
+            elif n == "DNAM" and pending is not None:
+                pending = pending[:4] + (fnv1a32(zs(d).lower()),)
+                self.travel.append(pending)
+                pending = None
+        if pending is not None:
+            self.travel.append(pending)
+        return first, len(self.travel) - first
+
+    def class_record(self, cid: str):
+        o = self.gd.objects.get(cid.lower())
+        if not o or o[0] != "CLAS":
+            return None
+        d = o[1].get("CLDT")
+        return struct.unpack_from("<15i", d, 0) if d is not None and len(d) >= 60 else None
+
+    def class_services(self, cid: str) -> int:
+        c = self.class_record(cid)
+        return (c[14] & 0xFFFFFFFF) if c else 0
+
+    def autocalc_npc(self, rec: esm.Record, level: int):
+        """Attributes, skills and dynamics of an auto-calculated NPC (the
+        original engine's class/race/level formulas)."""
+        female = bool(_i32(rec.get("FLAG")) & 1)
+        race = self.gd.objects.get(zs(rec.get("RNAM")).lower())
+        rd = race[1].get("RADT") if race and race[0] == "RACE" else None
+        rd = rd if rd is not None and len(rd) >= 120 else bytes(140)
+        race_attr = struct.unpack_from("<16i", rd, 56)
+        bonus = struct.unpack_from("<14i", rd, 0)
+        cls = self.class_record(zs(rec.get("CNAM"))) or (0, 0, 0) + (-1,) * 10 + (0, 0)
+        fav = [cls[0], cls[1]]
+        spec = cls[2]
+        minor = [cls[3 + 2 * k] for k in range(5)]
+        major = [cls[4 + 2 * k] for k in range(5)]
+        skills_data = self.skill_data()
+        attrs = []
+        for a in range(8):
+            v = race_attr[2 * a + (1 if female else 0)] + (10 if a in fav else 0)
+            mod = 0.0
+            for sk, (gov, _sp, _u) in enumerate(skills_data):
+                if gov != a:
+                    continue
+                mod += 1.0 if sk in major else 0.5 if sk in minor else 0.2
+            attrs.append(int(min(100, _round_half_even(v + (level - 1) * mod))))
+        skills = []
+        for sk, (_gov, sspec, _u) in enumerate(skills_data):
+            base = 5 + (25 if sk in major else 10 if sk in minor else 0)
+            race_bonus = sum(bonus[2 * k + 1] for k in range(7) if bonus[2 * k] == sk)
+            majm = 1.0 if (sk in major or sk in minor) else 0.1
+            specm, specb = (0.5, 5) if sspec == spec else (0.0, 0)
+            skills.append(int(min(100, _round_half_even(base + race_bonus + specb + (level - 1) * (majm + specm)))))
+        mult = 3 + (2 if spec == 0 else 1 if spec == 2 else 0) + (1 if 5 in fav else 0)
+        health = int(0.5 * (attrs[0] + attrs[5])) + mult * (level - 1)
+        magicka = int(attrs[1] * self.gmst_num("fNPCbaseMagickaMult", 2.0))
+        fatigue = attrs[0] + attrs[2] + attrs[3] + attrs[5]
+        return attrs, bytes(skills), health, magicka, fatigue
 
     def _creature_actor(self, rec: esm.Record) -> int:
         d = rec.get("NPDT") or b""
@@ -734,6 +837,76 @@ class RpgBuilder:
                             max(-128, min(127, rank)), hello & 0xFF, fight & 0xFF, flee & 0xFF,
                             alarm & 0xFF, services & 0xFFFFFFFF))
         return len(self.actors) - 1
+
+    # ---------------------------------------------------------- rules data
+    def gmst_str(self, gid: str, fallback: str) -> str:
+        v = self.gd.gmsts.get(gid.lower())
+        return v[1] if v and isinstance(v[1], str) and v[1] else fallback
+
+    def gmst_num(self, gid: str, fallback: float) -> float:
+        v = self.gd.gmsts.get(gid.lower())
+        return float(v[1]) if v and not isinstance(v[1], str) else fallback
+
+    def skill_data(self) -> List[Tuple[int, int, Tuple[float, ...]]]:
+        """(attribute, specialization, use values) per skill (SKIL or defaults)."""
+        out = []
+        for i, (_n, _g, attr, spec, use) in enumerate(mwdata.SKILLS):
+            rec = self.gd.skills.get(i)
+            d = rec.get("SKDT") if rec is not None else None
+            if d is not None and len(d) >= 24:
+                a, sp = struct.unpack_from("<ii", d, 0)
+                out.append((a, sp, struct.unpack_from("<4f", d, 8)))
+            else:
+                out.append((attr, spec, tuple(float(u) for u in use)))
+        return out
+
+    def build_rules(self) -> None:
+        self.skill_rows = []
+        for i, ((name, gmst, _a, _s, _u), (attr, spec, use)) in enumerate(zip(mwdata.SKILLS, self.skill_data())):
+            rec = self.gd.skills.get(i)
+            desc = zs(rec.get("DESC")) if rec is not None else ""
+            self.skill_rows.append((self.names.add(mwscript.display_text(self.gmst_str(gmst, name))),
+                                    attr & 0xFF, spec & 0xFF, 0, *use,
+                                    self.blobs.add_text(mwscript.display_text(desc)) if desc else NONE32, 0))
+        self.mgef_rows = []
+        for i, (ident, gmst, hard) in enumerate(mwdata.EFFECTS):
+            rec = self.gd.mgefs.get(i)
+            d = rec.get("MEDT") if rec is not None else None
+            if d is not None and len(d) >= 36:
+                school, cost, flags = struct.unpack_from("<ifi", d, 0)
+                speed = struct.unpack_from("<f", d, 28)[0]
+                flags = (flags & mwdata.MF_MODIFIABLE) | hard
+                present = 1
+            else:
+                school, cost, flags, speed, present = 0, 0.0, hard, 1.0, 0
+            name = self.gmst_str(gmst, re.sub(r"(?<!^)(?=[A-Z])", " ", ident))
+            self.mgef_rows.append((self.names.add(mwscript.display_text(name)), flags & 0xFFFFFFFF, cost,
+                                   speed, max(0, min(5, school)), present,
+                                   mwdata.RESISTED_BY.get(i, -1), mwdata.WEAKENED_BY.get(i, -1), 0))
+        races = []
+        for key, (t, rec) in self.gd.objects.items():
+            if t != "RACE":
+                continue
+            d = rec.get("RADT") or bytes(140)
+            if len(d) < 140:
+                d = d + bytes(140 - len(d))
+            bonus = struct.unpack_from("<14i", d, 0)
+            attrs = struct.unpack_from("<16i", d, 56)
+            hm, hf, wm, wf = struct.unpack_from("<4f", d, 120)
+            rflags = struct.unpack_from("<i", d, 136)[0]
+            desc = zs(rec.get("DESC"))
+            races.append((fnv1a32(key), self.names.opt(mwscript.display_text(zs(rec.get("FNAM")))),
+                          *[max(-1, min(26, bonus[2 * k])) for k in range(7)],
+                          *[max(0, min(255, bonus[2 * k + 1])) for k in range(7)],
+                          *[max(0, min(0xFFFF, a)) for a in attrs], hm, hf, wm, wf, rflags & 0xFFFFFFFF,
+                          self.blobs.add_text(mwscript.display_text(desc)) if desc else NONE32))
+        self.races = sorted(races, key=lambda r: r[0])
+        self.markers = [(x, y, z, rz, fnv1a32(cell) if cell else 0, kind)
+                        for kind, x, y, z, rz, cell in self.gd.markers]
+        self.report["skills_from_records"] = len(self.gd.skills)
+        self.report["magic_effects_from_records"] = len(self.gd.mgefs)
+        self.report["races"] = len(self.races)
+        self.report["markers"] = len(self.markers)
 
     # ---------------------------------------------------------- spells
     def build_spells(self) -> None:
@@ -909,6 +1082,7 @@ class RpgBuilder:
     def build(self) -> Dict[str, bytes]:
         self.compile_scripts()
         self.build_globals()
+        self.build_rules()
         self.build_objects()
         self.build_spells()
         self.build_factions()
@@ -980,14 +1154,23 @@ class RpgBuilder:
         tables.append(table(INFO_FMT, self.infos))
         tables.append(table(COND_FMT, self.conds))
         tables.append(table(BLOCK_FMT, blocks))
+        tables.append(table(SKILL_FMT, self.skill_rows))
+        tables.append(table(MGEF_FMT, self.mgef_rows))
+        tables.append(table(RACE_FMT, self.races))
+        tables.append(table(TRAVEL_FMT, self.travel))
+        tables.append(table(MARKER_FMT, self.markers))
         w.align(16)
         names_ofs = w.bytes(bytes(self.names.data))
         w.align(16)
         size = w.tell()
         flat = [v for pair in tables for v in pair]
         w.patch(0, HEADER_FMT[1:], DRPG_MAGIC, DRPG_VERSION, 0, player_index, names_ofs,
-                len(self.names.data), *flat, topic_hash_ofs, size)
+                len(self.names.data), *flat, topic_hash_ofs, size, 0)
         return w.getvalue()
+
+
+def _round_half_even(v: float) -> float:
+    return float(round(v))
 
 
 def _u16(v: int) -> int:
@@ -1026,8 +1209,8 @@ def read_rpg(core: bytes) -> dict:
     magic, version, _flags, player, names_ofs, names_size = vals[:6]
     if magic != DRPG_MAGIC or version != DRPG_VERSION:
         raise ValueError("not a DRPG core")
-    pairs = vals[6:6 + 32]
-    topic_hash_ofs, size = vals[38], vals[39]
+    pairs = vals[6:6 + 42]
+    topic_hash_ofs, size = vals[48], vals[49]
     if size != len(core):
         raise ValueError("DRPG size mismatch")
     names = core[names_ofs:names_ofs + names_size]
@@ -1039,9 +1222,11 @@ def read_rpg(core: bytes) -> dict:
         return names[ofs:end].decode("latin-1")
 
     fmts = [OBJECT_FMT, ACTOR_FMT, LIST_FMT, EFFECT_FMT, SPELL_FMT, FACTION_FMT, REACTION_FMT,
-            GLOBAL_FMT, GMST_FMT, SCRIPT_FMT, VAR_FMT, "<H", TOPIC_FMT, INFO_FMT, COND_FMT, BLOCK_FMT]
+            GLOBAL_FMT, GMST_FMT, SCRIPT_FMT, VAR_FMT, "<H", TOPIC_FMT, INFO_FMT, COND_FMT, BLOCK_FMT,
+            SKILL_FMT, MGEF_FMT, RACE_FMT, TRAVEL_FMT, MARKER_FMT]
     keys = ["objects", "actors", "lists", "effects", "spells", "factions", "reactions", "globals",
-            "gmsts", "scripts", "vars", "starts", "topics", "infos", "conds", "blocks"]
+            "gmsts", "scripts", "vars", "starts", "topics", "infos", "conds", "blocks", "skills",
+            "mgefs", "races", "travel", "markers"]
     out = {"player": player, "name": name}
     for i, (key, fmt) in enumerate(zip(keys, fmts)):
         ofs, count = pairs[2 * i], pairs[2 * i + 1]

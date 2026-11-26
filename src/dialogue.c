@@ -24,7 +24,7 @@ enum {
     F_FLEE = 70, F_SHOULD_ATTACK = 71, F_WEREWOLF = 72, F_PC_WEREWOLF_KILLS = 73
 };
 
-#define SPELL_SALT 0x5bd1e995u
+#define SPELL_SALT VM_SPELL_SALT
 
 static int is_word_char(int c)
 {
@@ -63,12 +63,6 @@ static const char *player_cell(const Dialogue *d)
     return vm->host.cell_name ? vm->host.cell_name(vm->host.user) : "";
 }
 
-static const DRpgObject *player_object(const Dialogue *d)
-{
-    if (d->db->hdr->player != DRPG_NONE)
-        return &d->db->objects[d->db->hdr->player];
-    return NULL;
-}
 
 /* ------------------------------------------------------------------------ */
 /* condition evaluation                                                     */
@@ -156,7 +150,7 @@ static int faction_rank_ok(Dialogue *d, uint32_t faction, int rank, int *skills_
         int v;
         if (f->skill[i] < 0 || f->skill[i] > 26)
             continue;
-        v = (int)vm_prop(d->vm, &pc, MWP_SKILL_BLOCK + f->skill[i]);
+        v = (int)vm_stat(d->vm, &pc, MWP_SKILL_BLOCK + f->skill[i]);
         n++;
         if (v > best) {
             second = best;
@@ -173,7 +167,7 @@ static int faction_rank_ok(Dialogue *d, uint32_t faction, int rank, int *skills_
     for (i = 0; i < 2 && *skills_ok; ++i) {
         int attr = f->attribute[i];
         if (attr >= 0 && attr < 8 &&
-            vm_prop(d->vm, &pc, MWP_ATTR_STRENGTH + attr) < (float)f->rank_req[rank][i])
+            vm_stat(d->vm, &pc, MWP_ATTR_STRENGTH + attr) < (float)f->rank_req[rank][i])
             *skills_ok = 0;
     }
     *rep_ok = vm_pc_facrep(d->vm, faction) >= f->rank_req[rank][4];
@@ -272,16 +266,16 @@ static int eval_cond(Dialogue *d, const DRpgCond *c)
     /* ---- numeric functions ---- */
     if (f == F_PC_HEALTH_PERCENT || f == F_HEALTH_PERCENT) {
         const VmRef *r = f == F_PC_HEALTH_PERCENT ? &pc : &d->actor;
-        float base = vm_prop(vm, r, MWP_DYNBASE_HEALTH);
-        int pct = base > 0.0f ? (int)(vm_prop(vm, r, MWP_DYN_HEALTH) / base * 100.0f) : 0;
+        float base = vm->stat_max ? vm->stat_max(vm->mech, r, MWP_DYN_HEALTH) : vm_prop(vm, r, MWP_DYNBASE_HEALTH);
+        int pct = base > 0.0f ? (int)(vm_stat(vm, r, MWP_DYN_HEALTH) / base * 100.0f) : 0;
         return compare_value_int(c, pct);
     }
     if (f == F_PC_MAGICKA)
-        return compare_value_float(c, vm_prop(vm, &pc, MWP_DYN_MAGICKA));
+        return compare_value_float(c, vm_stat(vm, &pc, MWP_DYN_MAGICKA));
     if (f == F_PC_FATIGUE)
-        return compare_value_float(c, vm_prop(vm, &pc, MWP_DYN_FATIGUE));
+        return compare_value_float(c, vm_stat(vm, &pc, MWP_DYN_FATIGUE));
     if (f == F_PC_HEALTH)
-        return compare_value_float(c, vm_prop(vm, &pc, MWP_DYN_HEALTH));
+        return compare_value_float(c, vm_stat(vm, &pc, MWP_DYN_HEALTH));
     /* ---- boolean functions ---- */
     {
         int b = -1;
@@ -296,13 +290,11 @@ static int eval_cond(Dialogue *d, const DRpgCond *c)
         case F_PC_CORPRUS: /* active magic effects (corprus, vampirism) arrive with M5 */
         case F_PC_VAMPIRE: b = 0; break;
         case F_SAME_SEX: {
-            const DRpgObject *po = player_object(d);
-            b = npc && po && po->sex == ao->sex;
+            b = npc && vm_pc_female(vm) == ao->sex;
             break;
         }
         case F_SAME_RACE: {
-            const DRpgObject *po = player_object(d);
-            b = npc && po && po->link[0] == ao->link[0];
+            b = npc && vm_pc_race(vm) == ao->link[0];
             break;
         }
         case F_SAME_FACTION: {
@@ -312,9 +304,9 @@ static int eval_cond(Dialogue *d, const DRpgCond *c)
         }
         case F_DETECTED: b = 1; break;
         case F_ALARMED: b = 0; break;
-        case F_ATTACKED: b = vm_prop(vm, &d->actor, MWP_ATTACKED) != 0.0f; break;
+        case F_ATTACKED: b = vm_stat(vm, &d->actor, MWP_ATTACKED) != 0.0f; break;
         case F_TALKED_TO_PC: b = d->talked_to; break;
-        case F_SHOULD_ATTACK: b = vm_prop(vm, &d->actor, MWP_AI_FIGHT) >= 100.0f; break;
+        case F_SHOULD_ATTACK: b = vm_stat(vm, &d->actor, MWP_AI_FIGHT) >= 100.0f; break;
         case F_WEREWOLF: b = 0; break;
         default: break;
         }
@@ -325,11 +317,11 @@ static int eval_cond(Dialogue *d, const DRpgCond *c)
     {
         int32_t v = 0;
         if (f >= F_PC_BLOCK && f <= F_PC_HANDTOHAND) {
-            v = (int32_t)vm_prop(vm, &pc, MWP_SKILL_BLOCK + (f - F_PC_BLOCK));
+            v = (int32_t)vm_stat(vm, &pc, MWP_SKILL_BLOCK + (f - F_PC_BLOCK));
         } else if (f == F_PC_STRENGTH) {
-            v = (int32_t)vm_prop(vm, &pc, MWP_ATTR_STRENGTH);
+            v = (int32_t)vm_stat(vm, &pc, MWP_ATTR_STRENGTH);
         } else if (f >= F_PC_INTELLIGENCE && f <= F_PC_LUCK) {
-            v = (int32_t)vm_prop(vm, &pc, MWP_ATTR_STRENGTH + (f - F_PC_INTELLIGENCE + 1));
+            v = (int32_t)vm_stat(vm, &pc, MWP_ATTR_STRENGTH + (f - F_PC_INTELLIGENCE + 1));
         } else {
             switch (f) {
             case F_FACREACTION_LOWEST:
@@ -361,16 +353,15 @@ static int eval_cond(Dialogue *d, const DRpgCond *c)
                     v = (sk ? 1 : 0) + (rep ? 2 : 0);
                 break;
             }
-            case F_REPUTATION: v = npc ? (int32_t)vm_prop(vm, &d->actor, MWP_REPUTATION) : 0; break;
-            case F_PC_REPUTATION: v = (int32_t)vm_prop(vm, &pc, MWP_REPUTATION); break;
-            case F_PC_LEVEL: v = (int32_t)vm_prop(vm, &pc, MWP_LEVEL); break;
+            case F_REPUTATION: v = npc ? (int32_t)vm_stat(vm, &d->actor, MWP_REPUTATION) : 0; break;
+            case F_PC_REPUTATION: v = (int32_t)vm_stat(vm, &pc, MWP_REPUTATION); break;
+            case F_PC_LEVEL: v = (int32_t)vm_stat(vm, &pc, MWP_LEVEL); break;
             case F_PC_GENDER: {
-                const DRpgObject *po = player_object(d);
-                v = po ? po->sex : 0;
+                v = vm_pc_female(vm);
                 break;
             }
             case F_PC_CLOTHING_MODIFIER: v = 0; break; /* nothing is equipped before M5 */
-            case F_PC_CRIME_LEVEL: v = (int32_t)vm_prop(vm, &pc, MWP_CRIME); break;
+            case F_PC_CRIME_LEVEL: v = (int32_t)vm_stat(vm, &pc, MWP_CRIME); break;
             case F_FACTION_RANK_DIFFERENCE: {
                 uint32_t fac = actor_faction(d);
                 v = fac ? vm_pc_rank(vm, fac) - actor_rank(d) : 0;
@@ -378,13 +369,13 @@ static int eval_cond(Dialogue *d, const DRpgCond *c)
             }
             case F_CHOICE: v = d->choice; break;
             case F_WEATHER: v = 0; break;
-            case F_LEVEL: v = (int32_t)vm_prop(vm, &d->actor, MWP_LEVEL); break;
+            case F_LEVEL: v = (int32_t)vm_stat(vm, &d->actor, MWP_LEVEL); break;
             case F_CREATURE_TARGET: v = 0; break;
             case F_FRIEND_HIT: v = 0; break;
-            case F_FIGHT: v = (int32_t)vm_prop(vm, &d->actor, MWP_AI_FIGHT); break;
-            case F_HELLO: v = (int32_t)vm_prop(vm, &d->actor, MWP_AI_HELLO); break;
-            case F_ALARM: v = (int32_t)vm_prop(vm, &d->actor, MWP_AI_ALARM); break;
-            case F_FLEE: v = (int32_t)vm_prop(vm, &d->actor, MWP_AI_FLEE); break;
+            case F_FIGHT: v = (int32_t)vm_stat(vm, &d->actor, MWP_AI_FIGHT); break;
+            case F_HELLO: v = (int32_t)vm_stat(vm, &d->actor, MWP_AI_HELLO); break;
+            case F_ALARM: v = (int32_t)vm_stat(vm, &d->actor, MWP_AI_ALARM); break;
+            case F_FLEE: v = (int32_t)vm_stat(vm, &d->actor, MWP_AI_FLEE); break;
             case F_PC_WEREWOLF_KILLS: v = 0; break;
             default: return 1;
             }
@@ -393,7 +384,14 @@ static int eval_cond(Dialogue *d, const DRpgCond *c)
     }
 }
 
+static int test_info_mode(Dialogue *d, const DRpgTopic *t, uint32_t info, int *disp_fail, int invert);
+
 static int test_info(Dialogue *d, const DRpgTopic *t, uint32_t info, int *disp_fail)
+{
+    return test_info_mode(d, t, info, disp_fail, 0);
+}
+
+static int test_info_mode(Dialogue *d, const DRpgTopic *t, uint32_t info, int *disp_fail, int invert)
 {
     const DRpgInfo *in = &d->db->infos[info];
     uint32_t i;
@@ -403,6 +401,8 @@ static int test_info(Dialogue *d, const DRpgTopic *t, uint32_t info, int *disp_f
     for (i = 0; i < in->cond_count; ++i)
         if (!eval_cond(d, &d->db->conds[in->cond_first + i]))
             return 0;
+    if (invert)
+        return d->creature || in->data == 0 || vm_disposition(d->vm, &d->actor) < in->data;
     if (t->type != DRPG_TT_JOURNAL && !d->creature && vm_disposition(d->vm, &d->actor) < in->data) {
         *disp_fail = 1;
         return 0;
@@ -666,7 +666,8 @@ int dlg_start(Dialogue *d, const VmRef *actor, const char *actor_name)
     d->history_len = 0;
     d->list_count = 0;
     d->talked_to = vm_prop(d->vm, actor, MWP_TALKED) != 0.0f;
-    if (vm_prop(d->vm, actor, MWP_DYN_HEALTH) <= 0.0f && vm_prop(d->vm, actor, MWP_DYNBASE_HEALTH) > 0.0f)
+    if (vm_prop(d->vm, actor, MWP_DEAD) != 0.0f ||
+        (vm_prop(d->vm, actor, MWP_DYN_HEALTH) <= 0.0f && vm_prop(d->vm, actor, MWP_DYNBASE_HEALTH) > 0.0f))
         return 0; /* no conversations with the dead */
     for (t = 0; t < count; ++t) {
         int info;
@@ -727,6 +728,35 @@ void dlg_answer(Dialogue *d, uint32_t choice_index)
         respond(d, (uint32_t)info, NULL, 1);
     }
     update_list(d);
+}
+
+static int say_mode(Dialogue *d, const char *topic, int invert)
+{
+    int t = rpgdb_topic(d->db, pw_hash_name(topic));
+    uint32_t i;
+    const DRpgTopic *tp;
+    if (!d->active || t < 0)
+        return 0;
+    tp = &d->db->topics[t];
+    for (i = 0; i < tp->info_count; ++i) {
+        int dummy = 0;
+        if (test_info_mode(d, tp, tp->info_first + i, &dummy, invert)) {
+            respond(d, tp->info_first + i, NULL, 0);
+            update_list(d);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int dlg_service_refused(Dialogue *d)
+{
+    return say_mode(d, "service refusal", 1);
+}
+
+int dlg_say(Dialogue *d, const char *topic)
+{
+    return say_mode(d, topic, 0);
 }
 
 void dlg_end(Dialogue *d)

@@ -248,8 +248,8 @@ int main(int argc, char **argv)
         step(g, 0, 0, 0, 1.0f, 1.5f);
         CHECK(a->pos.y - g->body.pos.y >= 55.0f, "the villager blocks the player (gap %.1f)",
               a->pos.y - g->body.pos.y);
-        step(g, GB_RIGHT, GB_RIGHT, 0, 0, 0.05f);
-        CHECK(strstr(g->message, "plays") != NULL, "D-pad cycles the nearest actor's animation (%s)",
+        game_debug_cycle_animation(g, 1);
+        CHECK(strstr(g->message, "plays") != NULL, "debug cycles the nearest actor's animation (%s)",
               g->message);
     }
 

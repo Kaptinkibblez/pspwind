@@ -24,6 +24,13 @@
 #define ACTOR_FACE_DIST 300.0f
 #define KILL_Z -16384.0f
 
+static void actor_combat(Game *g, uint32_t i, float dt);
+static int door_lock(Game *g, uint32_t inst);
+static void rpg_teleport(void *user, uint32_t cell, const float pos[3], float rot_z);
+static void rpg_locate(void *user, uint32_t *cell, float pos[3], float *rot_z);
+static void rpg_killed(void *user, const VmRef *ref);
+static int rpg_hostiles(void *user, float radius);
+
 void game_default_controls(Controls *c)
 {
     c->scheme = CONTROL_SCHEME_A;
@@ -193,6 +200,22 @@ int game_enter_zone(Game *g, uint32_t zone, const float *pos, const float *rot, 
         return -1;
     }
     bind_scripts(g);
+    g->actor_timer = (float *)mem_try_alloc(MEM_REGION_ZONE, (g->actors.count + 1u) * sizeof(float), 4);
+    if (!g->actor_timer) {
+        snprintf(err, errlen, "out of zone memory for combat timers");
+        return -1;
+    }
+    for (i = 0; i < g->actors.count; ++i) {
+        g->actor_timer[i] = 1.0f;
+        if (g->rpg) {
+            VmRef ar = game_actor_ref(g, i);
+            if (rpg_is_dead(&g->rpg->rpg, &ar)) {
+                /* corpses stay down: jump to the end of the death animation */
+                actor_play(&g->actors.list[i], pw_hash_name("death1"), 0);
+                g->actors.list[i].time = 60.0f;
+            }
+        }
+    }
 
     if (pos) {
         feet = vec4(pos[0], pos[1], pos[2], 1.0f);
@@ -327,9 +350,23 @@ void game_take(Game *g, uint32_t inst)
         g->target = GAME_NO_TARGET;
 }
 
+static void open_loot(Game *g, uint32_t inst)
+{
+    g->ui_owner = game_instance_ref(g, inst);
+    vm_seed(&g->rpg->vm, &g->ui_owner);
+    g->ui_instance = inst;
+    g->ui_event = GAME_UI_LOOT;
+}
+
 static void start_dialogue(Game *g, uint32_t inst)
 {
     VmRef ref = game_instance_ref(g, inst);
+    if (rpg_is_dead(&g->rpg->rpg, &ref)) {
+        open_loot(g, inst);
+        return;
+    }
+    if (vm_prop(&g->rpg->vm, &ref, MWP_HOSTILE) != 0.0f)
+        return; /* no talking in the middle of a fight */
     if (dlg_start(&g->rpg->dlg, &ref, game_instance_name(g, inst)))
         g->ui_event = GAME_UI_DIALOGUE;
 }
@@ -344,7 +381,7 @@ static void default_activate(Game *g, uint32_t inst)
     if (in->kind == DZONE_INST_DOOR) {
         if (in->door != DZONE_NONE) {
             const DZoneDoor *d = &g->zone.doors[in->door];
-            if (d->lock_level > 0) {
+            if (door_lock(g, inst) > 0) {
                 game_message(g, "Locked.");
                 return;
             }
@@ -376,7 +413,12 @@ static void default_activate(Game *g, uint32_t inst)
             game_message(g, "Dialogue needs rpg.dpak (run rpg_compiler).");
         break;
     case DZONE_INST_CONTAINER:
-        game_message(g, "Containers open in Milestone 5.");
+        if (!g->rpg)
+            game_message(g, "Containers need rpg.dpak (run rpg_compiler).");
+        else if (door_lock(g, inst) > 0)
+            game_message(g, "Locked.");
+        else
+            open_loot(g, inst);
         break;
     case DZONE_INST_ITEM:
     case DZONE_INST_LIGHT:
@@ -578,6 +620,50 @@ static int host_call(void *user, Vm *vm, uint16_t func, const VmRef *ref, const 
     case MWF_ENABLEPLAYERCONTROLS:
         g->controls_disabled = func == MWF_DISABLEPLAYERCONTROLS;
         return 1;
+    case MWF_ENABLENAMEMENU:
+    case MWF_ENABLERACEMENU:
+    case MWF_ENABLECLASSMENU:
+    case MWF_ENABLEBIRTHMENU:
+    case MWF_ENABLESTATREVIEWMENU:
+        g->ui_chargen |= func == MWF_ENABLENAMEMENU ? GAME_CG_NAME : func == MWF_ENABLERACEMENU ? GAME_CG_RACE
+                         : func == MWF_ENABLECLASSMENU ? GAME_CG_CLASS : func == MWF_ENABLEBIRTHMENU ? GAME_CG_BIRTH
+                                                                                              : GAME_CG_REVIEW;
+        g->ui_event = GAME_UI_CHARGEN;
+        return 1;
+    case MWF_ENABLEINVENTORYMENU:
+        g->menus_enabled |= GAME_MENU_INVENTORY;
+        return 1;
+    case MWF_ENABLEMAGICMENU:
+        g->menus_enabled |= GAME_MENU_MAGIC;
+        return 1;
+    case MWF_ENABLEMAPMENU:
+        g->menus_enabled |= GAME_MENU_MAP;
+        return 1;
+    case MWF_ENABLESTATSMENU:
+        g->menus_enabled |= GAME_MENU_STATS;
+        return 1;
+    case MWF_ENABLEREST:
+        g->menus_enabled |= GAME_MENU_REST;
+        return 1;
+    case MWF_SHOWRESTMENU:
+        g->ui_event = GAME_UI_REST;
+        return 1;
+    case MWF_GETWEAPONDRAWN:
+        ret->i = g->rpg->rpg.draw_state == 1;
+        return 1;
+    case MWF_GETSPELLREADIED:
+        ret->i = g->rpg->rpg.draw_state == 2;
+        return 1;
+    case MWF_GETLOCKED:
+        ret->i = (ref->kind == VM_REF_OBJECT && ref->inst >= 0) ? door_lock(g, (uint32_t)ref->inst) > 0 : 0;
+        return 1;
+    case MWF_LOCK:
+    case MWF_UNLOCK:
+        if (ref->kind == VM_REF_OBJECT) {
+            float lv = func == MWF_UNLOCK ? -1.0f : (argc > 0 ? (float)args[0].i : 100.0f);
+            vm_set_prop(vm, ref, MWP_LOCK, lv);
+        }
+        return 1;
     case MWF_PLAYGROUP:
     case MWF_LOOPGROUP:
         if (ref->kind == VM_REF_OBJECT && ref->inst >= 0) {
@@ -645,6 +731,22 @@ int game_attach_rpg(Game *g, GameRpg *rpg, const char *data_dir, char *err, uint
         snprintf(err, errlen, "out of script memory");
         return -1;
     }
+    {
+        RpgHost rh;
+        memset(&rh, 0, sizeof(rh));
+        rh.user = g;
+        rh.teleport = rpg_teleport;
+        rh.locate = rpg_locate;
+        rh.killed = rpg_killed;
+        rh.hostiles_near = rpg_hostiles;
+        if (rpg_init(&rpg->rpg, &rpg->vm, &rpg->db, &rh) != 0) {
+            snprintf(err, errlen, "rpg.dpak lacks the v2 rules tables");
+            return -1;
+        }
+    }
+    /* Morrowind's character generation scripts unlock the menus step by
+     * step; without them everything is available from the start */
+    g->menus_enabled = rpgdb_script(&rpg->db, pw_hash_name("chargen")) >= 0 ? 0u : GAME_MENU_ALL;
     g->rpg = rpg;
     if (g->zone.hdr)
         bind_scripts(g);
@@ -680,6 +782,18 @@ static void update_actors(Game *g, float dt)
         Actor *a = &g->actors.list[i];
         float dx = g->body.pos.x - a->pos.x, dy = g->body.pos.y - a->pos.y;
         float d2 = dx * dx + dy * dy;
+        if (g->rpg && g->actor_timer) {
+            VmRef r = game_actor_ref(g, i);
+            if (rpg_is_dead(&g->rpg->rpg, &r))
+                continue; /* corpses neither turn nor block */
+            if (vm_prop(&g->rpg->vm, &r, MWP_HOSTILE) != 0.0f) {
+                actor_combat(g, i, dt);
+                dx = g->body.pos.x - a->pos.x;
+                dy = g->body.pos.y - a->pos.y;
+                d2 = dx * dx + dy * dy;
+                goto obstacle;
+            }
+        }
         if (a->rec->flags & DZONE_ACTOR_F_CREATURE) {
             /* creatures idle in place until AI (Milestone 6) */
         } else if (d2 < ACTOR_FACE_DIST * ACTOR_FACE_DIST) {
@@ -695,6 +809,7 @@ static void update_actors(Game *g, float dt)
                 actor_set_placement(a, &p, pw_wrap_angle(a->yaw + diff));
             }
         }
+    obstacle:
         if (g->phys.obstacle_count < PHYS_MAX_OBSTACLES && d2 < 1024.0f * 1024.0f) {
             PhysObstacle *o = &g->phys.obstacles[g->phys.obstacle_count++];
             o->x = a->pos.x;
@@ -711,7 +826,7 @@ static void update_actors(Game *g, float dt)
     }
 }
 
-static void cycle_nearest_animation(Game *g, int dir)
+void game_debug_cycle_animation(Game *g, int dir)
 {
     uint32_t i, best = 0xFFFFFFFFu;
     float best_d = 1e30f;
@@ -764,7 +879,315 @@ static void check_zone_border(Game *g)
     g->request.rot[2] = g->yaw;
 }
 
-static void rpg_tick(Game *g, float dt)
+/* ------------------------------------------------------------------------ */
+/* combat                                                                   */
+/* ------------------------------------------------------------------------ */
+VmRef game_actor_ref(const Game *g, uint32_t actor)
+{
+    return game_instance_ref(g, g->actors.list[actor].instance);
+}
+
+static int actor_dead(const Game *g, uint32_t actor)
+{
+    VmRef r;
+    if (!g->rpg)
+        return 0;
+    r = game_actor_ref(g, actor);
+    return rpg_is_dead(&g->rpg->rpg, &r);
+}
+
+/* nearest living actor whose body the view ray crosses, within max_dist */
+static int ray_actor(Game *g, float max_dist, float *dist)
+{
+    Vec4 o, d;
+    uint32_t i, wall_inst;
+    int best = -1;
+    float best_t = max_dist, wall_t;
+    view_ray(g, &o, &d);
+    for (i = 0; i < g->actors.count; ++i) {
+        const Actor *a = &g->actors.list[i];
+        Vec4 c = vec4(a->pos.x, a->pos.y, a->pos.z + 70.0f * a->scale, 1.0f);
+        float t;
+        if (actor_dead(g, i) || g->zone.inst_hidden[a->instance])
+            continue;
+        if (ray_sphere(&o, &d, &c, 48.0f * a->scale, &t) && t < best_t) {
+            best_t = t;
+            best = (int)i;
+        }
+    }
+    if (best >= 0 && phys_raycast(&g->phys, &o, &d, best_t, &wall_t, &wall_inst) && wall_t + 8.0f < best_t)
+        best = -1;
+    if (dist)
+        *dist = best_t;
+    return best;
+}
+
+static void hit_message(Game *g, const RpgHit *h, const char *name)
+{
+    char buf[80];
+    if (!h->hit)
+        snprintf(buf, sizeof(buf), "You miss %s.", name);
+    else if (h->blocked)
+        snprintf(buf, sizeof(buf), "%s blocks.", name);
+    else if (h->killed)
+        snprintf(buf, sizeof(buf), "%s is dead.", name);
+    else
+        snprintf(buf, sizeof(buf), "You hit %s for %d.", name, (int)(h->damage + 0.5f));
+    game_message(g, buf);
+}
+
+static int door_lock(Game *g, uint32_t inst)
+{
+    const DZoneInstance *in = &g->zone.instances[inst];
+    int lock = (in->door != DZONE_NONE) ? g->zone.doors[in->door].lock_level : 0;
+    if (g->rpg) {
+        VmRef r = game_instance_ref(g, inst);
+        float v = vm_prop(&g->rpg->vm, &r, MWP_LOCK);
+        if (v > 0.0f)
+            lock = (int)v;
+        else if (v < 0.0f)
+            lock = 0;
+    }
+    return lock;
+}
+
+static void player_attack(Game *g, float strength)
+{
+    Rpg *r = &g->rpg->rpg;
+    VmRef pc = vm_player_ref(&g->rpg->vm);
+    int st = rpg_equipped(r, &pc, RPG_SLOT_WEAPON), a;
+    const VmItem *it = st >= 0 ? vm_item_at(&g->rpg->vm, st) : NULL;
+    const DRpgObject *w = it ? rpg_object(r, it->item) : NULL;
+    float reach, t;
+    if (w && w->type == DRPG_OT_LOCK) {
+        /* a readied lockpick works on the targeted lock */
+        char msg[96];
+        int lvl;
+        if (g->target != GAME_NO_TARGET && g->zone.instances[g->target].kind == DZONE_INST_DOOR) {
+            VmRef d = game_instance_ref(g, g->target);
+            if (rpg_pick_lock(r, &d, door_lock(g, g->target), &lvl, msg, sizeof(msg)) && lvl == 0)
+                vm_set_prop(&g->rpg->vm, &d, MWP_LOCK, -1.0f);
+            game_message(g, msg);
+        }
+        return;
+    }
+    if (w && w->type == DRPG_OT_PROB)
+        return;
+    if (rpg_weapon_ranged(r, &pc)) {
+        if (!rpg_consume_ammo(r, &pc)) {
+            game_message(g, "You have no ammunition.");
+            return;
+        }
+        reach = 4096.0f;
+    } else {
+        reach = rpg_weapon_reach(r, &pc) + BODY_RADIUS;
+    }
+    a = ray_actor(g, reach, &t);
+    if (a < 0) {
+        /* a swing at the air still costs fatigue */
+        rpg_dyn_add(r, &pc, 2, -rpg_gmst_f(r, "fFatigueAttackBase", 2.0f));
+        return;
+    }
+    {
+        VmRef v = game_actor_ref(g, (uint32_t)a);
+        RpgHit h = rpg_attack(r, &pc, &v, strength);
+        hit_message(g, &h, game_instance_name(g, g->actors.list[a].instance));
+        g->enemy_key = v.key;
+        g->enemy_time = 6.0f;
+        if (h.hit && !h.killed)
+            actor_play(&g->actors.list[a], pw_hash_name("hit1"), 0);
+    }
+}
+
+static void apply_area(Game *g, const RpgCast *c, const VmRef *caster, const Vec4 *at, uint32_t skip_key)
+{
+    Rpg *r = &g->rpg->rpg;
+    float radius = c->area * 22.1f;
+    uint32_t i;
+    VmRef pc = vm_player_ref(&g->rpg->vm);
+    if (radius <= 0.0f)
+        return;
+    for (i = 0; i < g->actors.count; ++i) {
+        const Actor *a = &g->actors.list[i];
+        float dx = a->pos.x - at->x, dy = a->pos.y - at->y, dz = a->pos.z + 60.0f - at->z;
+        VmRef v = game_actor_ref(g, i);
+        if (v.key == skip_key || actor_dead(g, i) || dx * dx + dy * dy + dz * dz > radius * radius)
+            continue;
+        rpg_apply(r, caster, &v, c->effects, c->count, RPG_RANGE_TARGET, c->source, c->chance, 1);
+    }
+    {
+        float dx = g->body.pos.x - at->x, dy = g->body.pos.y - at->y;
+        if (skip_key != pc.key && dx * dx + dy * dy <= radius * radius)
+            rpg_apply(r, caster, &pc, c->effects, c->count, RPG_RANGE_TARGET, c->source, c->chance, 1);
+    }
+}
+
+static void player_cast(Game *g)
+{
+    Rpg *r = &g->rpg->rpg;
+    VmRef pc = vm_player_ref(&g->rpg->vm);
+    RpgCast c;
+    if (!rpg_begin_cast(r, &pc, &c)) {
+        game_message(g, c.message[0] ? c.message : "You cannot cast that.");
+        return;
+    }
+    if (c.has[RPG_RANGE_SELF])
+        rpg_apply(r, &pc, &pc, c.effects, c.count, RPG_RANGE_SELF, c.source, c.chance, 1);
+    if (c.has[RPG_RANGE_TOUCH]) {
+        float t;
+        int a = ray_actor(g, GAME_ACTIVATE_DIST, &t);
+        if (a >= 0) {
+            VmRef v = game_actor_ref(g, (uint32_t)a);
+            rpg_apply(r, &pc, &v, c.effects, c.count, RPG_RANGE_TOUCH, c.source, c.chance, 1);
+            g->enemy_key = v.key;
+            g->enemy_time = 6.0f;
+        } else if (g->target != GAME_NO_TARGET) {
+            /* doors and containers: Open / Lock */
+            VmRef d = game_instance_ref(g, g->target);
+            rpg_apply(r, &pc, &d, c.effects, c.count, RPG_RANGE_TOUCH, c.source, c.chance, 1);
+        }
+    }
+    if (c.has[RPG_RANGE_TARGET]) {
+        Vec4 o, d, at;
+        float t, wall_t;
+        uint32_t wall_inst;
+        int a = ray_actor(g, 4096.0f, &t);
+        VmRef v;
+        memset(&v, 0, sizeof(v));
+        view_ray(g, &o, &d);
+        if (a >= 0) {
+            v = game_actor_ref(g, (uint32_t)a);
+            rpg_apply(r, &pc, &v, c.effects, c.count, RPG_RANGE_TARGET, c.source, c.chance, 1);
+            g->enemy_key = v.key;
+            g->enemy_time = 6.0f;
+        } else if (phys_raycast(&g->phys, &o, &d, 4096.0f, &wall_t, &wall_inst)) {
+            t = wall_t;
+        } else {
+            t = 4096.0f;
+        }
+        at = vec4(o.x + d.x * t, o.y + d.y * t, o.z + d.z * t, 1.0f);
+        apply_area(g, &c, &pc, &at, v.key);
+    }
+    game_message(g, rpg_spell_name(r, c.source)[0] ? rpg_spell_name(r, c.source) : "Cast.");
+}
+
+/* hostile actors turn on the player, close in and strike (in place of the
+ * full AI packages of Milestone 6) */
+static void actor_combat(Game *g, uint32_t i, float dt)
+{
+    Rpg *r = &g->rpg->rpg;
+    Actor *a = &g->actors.list[i];
+    VmRef self = game_actor_ref(g, i), pc = vm_player_ref(&g->rpg->vm);
+    float dx = g->body.pos.x - a->pos.x, dy = g->body.pos.y - a->pos.y, d = sqrtf(dx * dx + dy * dy);
+    float reach = rpg_weapon_reach(r, &self) + BODY_RADIUS * 2.0f;
+    float want = atan2f(dx, dy);
+    Vec4 p = a->pos;
+    if (d > 3000.0f || g->player_dead || rpg_effect(r, &self, MGEF_PARALYZE, -1) > 0.0f)
+        return;
+    if (d > reach * 0.9f) {
+        float step = rpg_walk_speed(r, &self) * dt, ground;
+        if (step > d - reach * 0.8f)
+            step = d - reach * 0.8f;
+        p.x += dx / d * step;
+        p.y += dy / d * step;
+        if (phys_ground(&g->phys, p.x, p.y, p.z + PHYS_STEP_UP, &ground) && ground > p.z - 256.0f)
+            p.z = ground;
+    }
+    actor_set_placement(a, &p, want);
+    if (g->actor_timer[i] > 0.0f)
+        g->actor_timer[i] -= dt;
+    if (d <= reach && g->actor_timer[i] <= 0.0f) {
+        float strength = 0.5f + 0.5f * vm_random01(&g->rpg->vm);
+        RpgHit h = rpg_attack(r, &self, &pc, strength);
+        actor_play(a, pw_hash_name("attack1"), 0);
+        g->actor_timer[i] = 1.2f + 0.8f * vm_random01(&g->rpg->vm);
+        if (h.hit && h.damage > 0.0f) {
+            char buf[80];
+            snprintf(buf, sizeof(buf), "%s hits you for %d.", game_instance_name(g, a->instance),
+                     (int)(h.damage + 0.5f));
+            game_message(g, buf);
+        }
+    }
+}
+
+/* ------------------------------------------------------------------------ */
+/* rpg host                                                                 */
+/* ------------------------------------------------------------------------ */
+static void rpg_teleport(void *user, uint32_t cell, const float pos[3], float rot_z)
+{
+    Game *g = (Game *)user;
+    int zi = cell ? world_find_interior(g->world, cell)
+                  : world_find_exterior(g->world, (int)floorf(pos[0] / 8192.0f), (int)floorf(pos[1] / 8192.0f));
+    if (zi < 0) {
+        game_message(g, "That place was not cooked.");
+        return;
+    }
+    g->request.pending = 1;
+    g->request.zone = (uint32_t)zi;
+    g->request.has_pos = 1;
+    memcpy(g->request.pos, pos, sizeof(g->request.pos));
+    g->request.rot[0] = g->request.rot[1] = 0.0f;
+    g->request.rot[2] = rot_z;
+}
+
+static void rpg_locate(void *user, uint32_t *cell, float pos[3], float *rot_z)
+{
+    Game *g = (Game *)user;
+    *cell = g->zone.hdr && g->zone.hdr->kind != DZONE_KIND_EXTERIOR
+                ? g->world->zone_list[g->zone.index].cell_hash : 0;
+    pos[0] = g->body.pos.x;
+    pos[1] = g->body.pos.y;
+    pos[2] = g->body.pos.z;
+    *rot_z = g->yaw;
+}
+
+static void rpg_killed(void *user, const VmRef *ref)
+{
+    Game *g = (Game *)user;
+    uint32_t i;
+    if (ref->kind == VM_REF_PLAYER) {
+        g->player_dead = 1;
+        g->ui_event = GAME_UI_DEATH;
+        return;
+    }
+    for (i = 0; i < g->actors.count; ++i) {
+        VmRef a = game_actor_ref(g, i);
+        if (a.key == ref->key)
+            actor_play(&g->actors.list[i], pw_hash_name("death1"), 0);
+    }
+}
+
+static int rpg_hostiles(void *user, float radius)
+{
+    Game *g = (Game *)user;
+    uint32_t i;
+    for (i = 0; i < g->actors.count; ++i) {
+        const Actor *a = &g->actors.list[i];
+        VmRef r = game_actor_ref(g, i);
+        float dx = g->body.pos.x - a->pos.x, dy = g->body.pos.y - a->pos.y;
+        if (!actor_dead(g, i) && vm_prop(&g->rpg->vm, &r, MWP_HOSTILE) != 0.0f &&
+            dx * dx + dy * dy < radius * radius)
+            return 1;
+    }
+    return 0;
+}
+
+void game_respawn(Game *g)
+{
+    char err[120];
+    VmRef pc;
+    int d;
+    if (!g->rpg)
+        return;
+    pc = vm_player_ref(&g->rpg->vm);
+    vm_set_prop(&g->rpg->vm, &pc, MWP_DEAD, 0.0f);
+    for (d = 0; d < 3; ++d)
+        vm_set_prop(&g->rpg->vm, &pc, MWP_DYN_HEALTH + d, rpg_dyn_max(&g->rpg->rpg, &pc, d));
+    g->player_dead = 0;
+    game_enter_zone(g, g->zone.index, NULL, NULL, err, sizeof(err));
+}
+
+static void game_rpg_tick(Game *g, float dt)
 {
     Vm *vm;
     if (!g->rpg)
@@ -772,6 +1195,8 @@ static void rpg_tick(Game *g, float dt)
     vm = &g->rpg->vm;
     vm->menu_mode = g->menu_mode;
     vm_tick(vm, dt);
+    if (!g->menu_mode)
+        rpg_tick(&g->rpg->rpg, dt);
     if (g->cell_changed > 0)
         g->cell_changed--;
     if (vm->has_force_greeting) {
@@ -797,7 +1222,7 @@ void game_update(Game *g, const InputState *in, float dt)
         g->message_time -= dt;
     if (g->menu_mode) {
         /* menus pause the world; scripts keep running and see MenuMode */
-        rpg_tick(g, dt);
+        game_rpg_tick(g, dt);
         return;
     }
     if (g->controls_disabled) {
@@ -836,19 +1261,56 @@ void game_update(Game *g, const InputState *in, float dt)
         g->body.height = g->sneaking ? SNEAK_HEIGHT : BODY_HEIGHT;
         game_message(g, g->sneaking ? "Sneaking" : "Standing");
     }
-    if (pressed & GB_LEFT)
-        cycle_nearest_animation(g, -1);
-    if (pressed & GB_RIGHT)
-        cycle_nearest_animation(g, 1);
+    if (g->rpg && (pressed & GB_LEFT)) {
+        Rpg *r = &g->rpg->rpg;
+        r->draw_state = r->draw_state == 1 ? 0 : 1;
+        game_message(g, r->draw_state == 1 ? "Weapon ready" : "Weapon away");
+    }
+    if (g->rpg && (pressed & GB_RIGHT)) {
+        Rpg *r = &g->rpg->rpg;
+        r->draw_state = r->draw_state == 2 ? 0 : 2;
+        game_message(g, r->draw_state == 2 ? "Magic ready" : "Magic away");
+    }
 
     /* ---- movement */
-    speed = g->flying ? FLY_SPEED : (g->body.swimming ? SWIM_SPEED
-                                     : (g->sneaking ? SNEAK_SPEED
-                                        : (g->running ? RUN_SPEED : WALK_SPEED)));
+    if (g->rpg && !g->flying) {
+        Rpg *r = &g->rpg->rpg;
+        VmRef pc = vm_player_ref(&g->rpg->vm);
+        float walk = rpg_walk_speed(r, &pc);
+        int paralyzed = rpg_effect(r, &pc, MGEF_PARALYZE, -1) > 0.0f;
+        speed = g->body.swimming ? walk * (0.5f + 0.005f * rpg_skill(r, &pc, SKILL_ATHLETICS)) +
+                                       rpg_effect(r, &pc, MGEF_SWIFT_SWIM, -1)
+                : g->sneaking ? walk * rpg_gmst_f(r, "fSneakSpeedMultiplier", 0.75f)
+                : g->running ? rpg_run_speed(r, &pc) : walk;
+        if (rpg_effect(r, &pc, MGEF_LEVITATE, -1) > 0.0f)
+            speed = walk + rpg_effect(r, &pc, MGEF_LEVITATE, -1);
+        g->body.levitate = (uint8_t)(rpg_effect(r, &pc, MGEF_LEVITATE, -1) > 0.0f);
+        g->body.water_walk = (uint8_t)(rpg_effect(r, &pc, MGEF_WATER_WALKING, -1) > 0.0f);
+        g->body.fall_mult = rpg_effect(r, &pc, MGEF_SLOW_FALL, -1) > 0.0f ? 0.15f : 1.0f;
+        if (rpg_encumbrance(r, &pc) > rpg_capacity(r, &pc)) {
+            speed = 0.0f;
+            if (!g->encumbered_notice && (move_x != 0.0f || move_y != 0.0f))
+                vm_notify(&g->rpg->vm, rpgdb_gmst_string(&g->rpg->db, "sNotifyMessage59",
+                                                         "You are carrying too much to move."));
+            g->encumbered_notice = 1;
+        } else {
+            g->encumbered_notice = 0;
+        }
+        if (paralyzed || g->player_dead)
+            speed = 0.0f;
+        r->moving = (move_x != 0.0f || move_y != 0.0f) && speed > 0.0f;
+        r->running = g->running && !g->sneaking;
+        r->swimming = g->body.swimming;
+        r->sneaking = g->sneaking;
+    } else {
+        speed = g->flying ? FLY_SPEED : (g->body.swimming ? SWIM_SPEED
+                                         : (g->sneaking ? SNEAK_SPEED
+                                            : (g->running ? RUN_SPEED : WALK_SPEED)));
+    }
     pw_sincosf(g->yaw, &sy, &cy);
     /* forward = (sin yaw, cos yaw); right = (cos yaw, -sin yaw) */
     wish = vec4((sy * move_y + cy * move_x) * speed, (cy * move_y - sy * move_x) * speed, 0.0f, 0.0f);
-    if (g->flying || g->body.swimming) {
+    if (g->flying || g->body.swimming || g->body.levitate) {
         float sp, cp;
         pw_sincosf(g->pitch, &sp, &cp);
         wish.x *= cp;
@@ -863,7 +1325,29 @@ void game_update(Game *g, const InputState *in, float dt)
     }
     update_doors(g, dt);
     update_actors(g, dt);
-    phys_move(&g->phys, &g->body, &wish, !g->flying && (pressed & GB_L) != 0, JUMP_SPEED, dt);
+    {
+        int jump = !g->flying && (pressed & GB_L) != 0 && !g->player_dead;
+        int grounded = g->body.on_ground;
+        float jump_speed = JUMP_SPEED;
+        if (g->rpg) {
+            VmRef pc = vm_player_ref(&g->rpg->vm);
+            jump_speed = rpg_jump_speed(&g->rpg->rpg, &pc);
+        }
+        phys_move(&g->phys, &g->body, &wish, jump, jump_speed, dt);
+        if (g->rpg && !g->flying) {
+            if (jump && grounded && !g->body.on_ground)
+                rpg_player_jumped(&g->rpg->rpg);
+            if (!g->body.on_ground && !g->body.swimming && !g->body.levitate) {
+                if (!g->was_airborne || g->body.pos.z > g->fall_top)
+                    g->fall_top = g->body.pos.z;
+                g->was_airborne = 1;
+            } else {
+                if (g->was_airborne && g->body.on_ground)
+                    rpg_player_landed(&g->rpg->rpg, g->fall_top - g->body.pos.z);
+                g->was_airborne = 0;
+            }
+        }
+    }
     if (g->body.pos.z < KILL_Z) {
         char err[8];
         game_message(g, "You fell out of the world.");
@@ -871,12 +1355,37 @@ void game_update(Game *g, const InputState *in, float dt)
         return;
     }
 
-    /* ---- activation */
+    /* ---- activation and combat */
     g->target = find_target(g);
-    if ((pressed & GB_R) && !g->flying) {
-        if (g->target != GAME_NO_TARGET)
+    if (g->cast_cooldown > 0.0f)
+        g->cast_cooldown -= dt;
+    if (g->enemy_time > 0.0f)
+        g->enemy_time -= dt;
+    if (!g->flying && !g->player_dead) {
+        int state = g->rpg ? g->rpg->rpg.draw_state : 0;
+        if (state == 1) {
+            if (held & GB_R) {
+                g->attack_holding = 1;
+                g->attack_charge = PW_MIN(1.0f, g->attack_charge + dt);
+            } else if (g->attack_holding) {
+                player_attack(g, PW_MAX(0.1f, g->attack_charge));
+                g->attack_holding = 0;
+                g->attack_charge = 0.0f;
+            }
+        } else if (state == 2) {
+            if ((pressed & GB_R) && g->cast_cooldown <= 0.0f) {
+                player_cast(g);
+                g->cast_cooldown = 0.8f;
+            }
+        } else if ((pressed & GB_R) && g->target != GAME_NO_TARGET) {
             activate(g, g->target);
+        }
     }
-    rpg_tick(g, dt);
+    if (g->rpg) {
+        int cx = (int)floorf(g->body.pos.x / 8192.0f), cy2 = (int)floorf(g->body.pos.y / 8192.0f);
+        if (g->zone.hdr->kind == DZONE_KIND_EXTERIOR)
+            rpg_visit_cell(&g->rpg->rpg, cx, cy2);
+    }
+    game_rpg_tick(g, dt);
     check_zone_border(g);
 }

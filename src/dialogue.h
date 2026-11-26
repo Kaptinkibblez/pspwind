@@ -68,6 +68,12 @@ int dlg_start(Dialogue *d, const VmRef *actor, const char *actor_name);
 void dlg_ask(Dialogue *d, uint32_t topic);
 void dlg_answer(Dialogue *d, uint32_t choice_index);
 void dlg_end(Dialogue *d);
+/* "Service Refusal" (inverted disposition test): shows the refusal and
+ * returns 1 when the speaker will not offer services right now. */
+int dlg_service_refused(Dialogue *d);
+/* Answers from a Persuasion-type topic ("admire success", "bribe fail"...,
+ * lower case): the first matching info is shown; returns 0 when none. */
+int dlg_say(Dialogue *d, const char *topic);
 
 /* Keyword spans of the listed topics inside text; returns the count. */
 int dlg_links(const Dialogue *d, const char *text, DlgLink *out, int max);

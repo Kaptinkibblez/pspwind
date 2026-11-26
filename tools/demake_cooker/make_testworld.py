@@ -608,6 +608,113 @@ def infos(topic: str, entries) -> List[bytes]:
     return out
 
 
+PLAYER_ITEMS = [("Gold_001", 100), ("tw_dagger", 1), ("tw_hammer", 1), ("tw_mortar", 1), ("tw_pick", 1),
+                ("tw_soulgem", 1), ("tw_reed", 2), ("tw_root", 2), ("tw_potion_heal", 1),
+                ("tw_scroll", 1), ("tw_skillbook", 1), ("tw_cuirass", 1), ("tw_boots", 1), ("tw_shield", 1)]
+
+# magic effects used by the test content: index -> (school, base cost)
+TEST_MGEFS = {3: (0, 2.0), 7: (0, 1.0), 8: (0, 1.0), 9: (0, 3.0), 13: (0, 6.0), 14: (2, 5.0),
+              16: (2, 5.0), 18: (2, 4.0), 23: (2, 8.0), 27: (2, 9.0), 39: (3, 40.0), 41: (3, 0.3),
+              44: (3, 5.0), 45: (3, 40.0), 57: (4, 5.0), 58: (4, 2.0), 60: (4, 18.0), 61: (4, 18.0),
+              62: (4, 15.0), 72: (5, 15.0), 75: (5, 5.0), 77: (5, 1.0), 79: (5, 1.0), 83: (5, 1.0),
+              84: (5, 1.0), 86: (4, 8.0), 90: (5, 2.0), 117: (5, 1.0), 120: (1, 2.0)}
+
+
+def effect(eff, rng=0, area=0, dur=0, mn=1, mx=1, skill=-1, attr=-1):
+    return struct.pack("<hbbiiiii", eff, skill, attr, rng, area, dur, mn, mx)
+
+
+def race_record(rid, name, bonuses, attrs, flags, powers):
+    radt = b"".join(struct.pack("<ii", s, b) for s, b in bonuses)
+    radt += b"".join(struct.pack("<ii", -1, 0) for _ in range(7 - len(bonuses)))
+    radt += b"".join(struct.pack("<ii", a, a) for a in attrs)
+    radt += struct.pack("<4fi", 1.0, 0.95, 1.0, 0.9, flags)
+    subs = [esm.sub("NAME", esm.zs(rid)), esm.sub("FNAM", esm.zs(name)), esm.sub("RADT", radt)]
+    subs += [esm.sub("NPCS", p.encode("latin-1").ljust(32, b"\0")) for p in powers]
+    subs.append(esm.sub("DESC", esm.zs(f"The {name} of the test shore.")))
+    return esm.record("RACE", subs)
+
+
+def class_record(cid, name, attrs, spec, pairs, playable):
+    vals = [attrs[0], attrs[1], spec] + [v for pr in pairs for v in pr] + [playable, 0]
+    return esm.record("CLAS", [esm.sub("NAME", esm.zs(cid)), esm.sub("FNAM", esm.zs(name)),
+                               esm.sub("CLDT", struct.pack("<15i", *vals))])
+
+
+def spell_record(sid, name, stype, cost, flags, effects):
+    return esm.record("SPEL", [esm.sub("NAME", esm.zs(sid)), esm.sub("FNAM", esm.zs(name)),
+                               esm.sub("SPDT", struct.pack("<iii", stype, cost, flags))]
+                      + [esm.sub("ENAM", e) for e in effects])
+
+
+def rules_records() -> List[bytes]:
+    import mwdata
+    recs = []
+    for i, (name, _g, attr, spec, use) in enumerate(mwdata.SKILLS):
+        recs.append(esm.record("SKIL", [esm.sub("INDX", struct.pack("<i", i)),
+                                        esm.sub("SKDT", struct.pack("<ii4f", attr, spec, *use)),
+                                        esm.sub("DESC", esm.zs(f"The art of {name.lower()}."))]))
+    for idx, (school, cost) in sorted(TEST_MGEFS.items()):
+        recs.append(esm.record("MGEF", [esm.sub("INDX", struct.pack("<i", idx)),
+                                        esm.sub("MEDT", struct.pack("<ifiiiifff", school, cost, 0x600,
+                                                                    255, 128, 64, 1.0, 1.0, 1.0))]))
+    recs += [
+        class_record("tw_warrior", "Shore Warrior", (0, 5), 0, [(8, 5), (19, 3), (20, 0), (26, 7), (22, 2)], 1),
+        class_record("tw_mage", "Shore Mage", (1, 2), 1, [(5, 10), (22, 11), (8, 15), (19, 14), (20, 16)], 1),
+        esm.record("BSGN", [esm.sub("NAME", esm.zs("tw_sign_blade")), esm.sub("FNAM", esm.zs("The Blade")),
+                            esm.sub("TNAM", esm.zs("birthsigns\\tw_blade.tga")),
+                            esm.sub("DESC", esm.zs("Born under the Blade.")),
+                            esm.sub("NPCS", b"tw_ability_attack".ljust(32, b"\0"))]),
+        esm.record("BSGN", [esm.sub("NAME", esm.zs("tw_sign_star")), esm.sub("FNAM", esm.zs("The Star")),
+                            esm.sub("DESC", esm.zs("Born under the Star.")),
+                            esm.sub("NPCS", b"tw_ability_magicka".ljust(32, b"\0"))]),
+        spell_record("tw_ability_attack", "Blade's Edge", 1, 0, 0, [effect(117, mn=10, mx=10)]),
+        spell_record("tw_ability_magicka", "Star's Gift", 1, 0, 0, [effect(84, mn=5, mx=5)]),
+        spell_record("tw_power", "Folk Strength", 5, 0, 0, [effect(79, dur=30, mn=20, mx=20, attr=0)]),
+        spell_record("tw_heal", "Mend", 0, 5, 1 | 2, [effect(75, dur=5, mn=2, mx=2)]),
+        spell_record("tw_bolt", "Frost Bolt", 0, 9, 1, [effect(16, rng=2, area=5, dur=1, mn=8, mx=12)]),
+        spell_record("tw_trap", "Soul Snare", 0, 6, 1, [effect(58, rng=1, dur=30)]),
+        spell_record("tw_disease", "Shore Cough", 3, 0, 0, [effect(77, mn=0, mx=0)]),
+        obj("WEAP", "tw_sword", "tw\\crate.nif", "Hamlet Sword",
+            extra=[esm.sub("WPDT", struct.pack("<fihHffH6Bi", 15.0, 50, 1, 400, 1.25, 1.0, 100,
+                                               4, 12, 3, 10, 2, 8, 0))]),
+        obj("WEAP", "bound_dagger", "tw\\crate.nif", "Bound Dagger",
+            extra=[esm.sub("WPDT", struct.pack("<fihHffH6Bi", 0.0, 0, 0, 500, 2.5, 1.0, 0,
+                                               10, 20, 10, 20, 10, 20, 1))]),
+        obj("ARMO", "tw_cuirass", "tw\\crate.nif", "Reed Cuirass",
+            extra=[esm.sub("AODT", struct.pack("<ifiiii", 1, 25.0, 80, 300, 50, 10))]),
+        obj("ARMO", "tw_boots", "tw\\crate.nif", "Reed Boots",
+            extra=[esm.sub("AODT", struct.pack("<ifiiii", 5, 6.0, 20, 100, 20, 4))]),
+        obj("ARMO", "tw_shield", "tw\\crate.nif", "Reed Shield",
+            extra=[esm.sub("AODT", struct.pack("<ifiiii", 8, 8.0, 30, 150, 30, 6))]),
+        obj("ALCH", "tw_potion_heal", "tw\\crate.nif", "Potion of Mending",
+            extra=[esm.sub("ALDT", struct.pack("<fii", 0.5, 15, 0)), esm.sub("ENAM", effect(75, dur=3, mn=10, mx=10))]),
+        obj("INGR", "tw_reed", "tw\\crate.nif", "Marsh Reed",
+            extra=[esm.sub("IRDT", struct.pack("<fi4i4i4i", 0.1, 2, 77, 79, -1, -1, -1, -1, -1, -1, -1, 3, -1, -1))]),
+        obj("INGR", "tw_root", "tw\\crate.nif", "Bitter Root",
+            extra=[esm.sub("IRDT", struct.pack("<fi4i4i4i", 0.1, 3, 77, 23, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1))]),
+        obj("APPA", "tw_mortar", "tw\\crate.nif", "Apprentice Mortar",
+            extra=[esm.sub("AADT", struct.pack("<iffi", 0, 0.5, 2.0, 6))]),
+        obj("REPA", "tw_hammer", "tw\\crate.nif", "Repair Hammer",
+            extra=[esm.sub("RIDT", struct.pack("<fiif", 2.0, 6, 10, 1.0))]),
+        obj("LOCK", "tw_pick", "tw\\crate.nif", "Apprentice Lockpick",
+            extra=[esm.sub("LKDT", struct.pack("<fifi", 0.2, 5, 1.0, 5))]),
+        obj("MISC", "tw_soulgem", "tw\\crate.nif", "Petty Soul Gem",
+            extra=[esm.sub("MCDT", struct.pack("<fii", 0.5, 10, 0))]),
+        obj("BOOK", "tw_scroll", "tw\\crate.nif", "Scroll of Sparks",
+            extra=[esm.sub("BKDT", struct.pack("<fiiii", 0.2, 20, 1, -1, 0)), esm.sub("ENAM", esm.zs("tw_scroll_en")),
+                   esm.sub("TEXT", b"Sparks fly.")]),
+        obj("BOOK", "tw_skillbook", "tw\\crate.nif", "On Reeds and Roots",
+            extra=[esm.sub("BKDT", struct.pack("<fiiii", 1.0, 30, 0, 16, 0)),
+                   esm.sub("TEXT", b"How to brew.<BR>Mix reeds and roots.")]),
+        esm.record("ENCH", [esm.sub("NAME", esm.zs("tw_scroll_en")),
+                            esm.sub("ENDT", struct.pack("<iiii", 0, 5, 5, 0)),
+                            esm.sub("ENAM", effect(14, rng=2, dur=1, mn=10, mx=10))]),
+        esm.record("STAT", [esm.sub("NAME", esm.zs("divinemarker"))]),
+    ]
+    return recs
+
+
 def rpg_records() -> List[bytes]:
     W = "tw_villager_f"
     E = "tw_villager"
@@ -624,10 +731,10 @@ def rpg_records() -> List[bytes]:
         esm.record("GMST", [esm.sub("NAME", esm.zs("fTestValue")), esm.sub("FLTV", struct.pack("<f", 2.5))]),
         esm.record("CLAS", [esm.sub("NAME", esm.zs("tw_weaver")), esm.sub("FNAM", esm.zs("Weaver")),
                             esm.sub("CLDT", struct.pack("<15i", 4, 6, 2, 9, 24, 16, 25, 8, 22, 18, 19,
-                                                        20, 21, 1, 0))]),
+                                                        20, 21, 0, 0))]),  # NPC-only class
         esm.record("CLAS", [esm.sub("NAME", esm.zs("tw_elder")), esm.sub("FNAM", esm.zs("Elder")),
                             esm.sub("CLDT", struct.pack("<15i", 1, 2, 0, 9, 24, 16, 25, 8, 22, 18, 19,
-                                                        20, 21, 1, 0))]),
+                                                        20, 21, 0, 0))]),  # NPC-only class
         esm.record("FACT", [esm.sub("NAME", esm.zs("tw_weavers")),
                             esm.sub("FNAM", esm.zs("Weavers' Circle"))]
                    + [esm.sub("RNAM", r.encode("latin-1").ljust(32, b"\0"))
@@ -649,7 +756,7 @@ def rpg_records() -> List[bytes]:
                                                2, 6, 3, 7, 4, 8, 0)),
                    esm.sub("ENAM", esm.zs("tw_spark_en"))]),
         esm.record("SPEL", [esm.sub("NAME", esm.zs("tw_spark")), esm.sub("FNAM", esm.zs("Spark")),
-                            esm.sub("SPDT", struct.pack("<iii", 0, 5, 0)),
+                            esm.sub("SPDT", struct.pack("<iii", 0, 5, 1 | 2)),
                             esm.sub("ENAM", struct.pack("<hbbiiiii", 14, -1, -1, 2, 0, 1, 5, 10))]),
         esm.record("ENCH", [esm.sub("NAME", esm.zs("tw_spark_en")),
                             esm.sub("ENDT", struct.pack("<iiii", 2, 10, 100, 0)),
@@ -662,8 +769,11 @@ def rpg_records() -> List[bytes]:
                             esm.sub("RNAM", esm.zs("tw_folk")), esm.sub("CNAM", esm.zs("tw_elder")),
                             esm.sub("NPDT", struct.pack("<h8B27BBHHHBBbBi", 1, *([40] * 8), *([15] * 27),
                                                         0, 50, 40, 60, 50, 0, -1, 0, 0)),
-                            esm.sub("FLAG", struct.pack("<i", 0))]),
+                            esm.sub("FLAG", struct.pack("<i", 0))]
+                   + [esm.sub("NPCO", struct.pack("<i", n) + i.encode("latin-1").ljust(32, b"\0"))
+                      for i, n in PLAYER_ITEMS]),
     ]
+    recs += rules_records()
     recs.append(dial("Greeting 0", 2))
     recs += infos("Greeting 0", [
         {"actor": W, "text": "Oh! A stranger. I'm the hamlet weaver. Have you heard about my lost ring?",
@@ -705,6 +815,18 @@ def rpg_records() -> List[bytes]:
     recs += infos("Info Refusal", [
         {"text": "I don't know you well enough to talk about that."},
     ])
+    # Persuasion-type topics: answers to the persuasion menu and the
+    # refusal shown when someone dislikes the player too much to trade
+    for kind, ok, bad in (("Admire", "You are too kind, %PCName.", "Flattery will get you nowhere."),
+                          ("Intimidate", "All right, all right!", "You don't scare me."),
+                          ("Taunt", "How dare you!", "Is that the best you can do?"),
+                          ("Bribe", "Most generous of you.", "Keep your coins.")):
+        recs.append(dial(kind + " Success", 3))
+        recs += infos(kind + " Success", [{"text": ok}])
+        recs.append(dial(kind + " Fail", 3))
+        recs += infos(kind + " Fail", [{"text": bad}])
+    recs.append(dial("Service Refusal", 3))
+    recs += infos("Service Refusal", [{"disp": 20, "text": "I will not deal with the likes of you."}])
     recs.append(dial(QUEST, 4))
     recs += infos(QUEST, [
         {"text": "The Weaver's Lost Ring", "quest": ("QSTN",)},
@@ -733,30 +855,47 @@ def build_esm() -> List[bytes]:
         obj("STAT", "tw_rock", "tw\\rock.nif"),
         obj("STAT", "tw_tree", "tw\\tree.nif"),
         obj("STAT", "tw_cellar_room", "tw\\cellar_room.nif"),
-        obj("CONT", "tw_crate", "tw\\crate.nif", "Crate"),
+        obj("CONT", "tw_crate", "tw\\crate.nif", "Crate",
+            extra=[esm.sub("CNDT", struct.pack("<f", 100.0)), esm.sub("FLAG", struct.pack("<i", 8)),
+                   esm.sub("CNTO", struct.pack("<i", 2) + esm.zs("tw_potion_heal").ljust(32, b"\0")),
+                   esm.sub("CNTO", struct.pack("<i", 15) + esm.zs("Gold_001").ljust(32, b"\0"))]),
         obj("DOOR", "tw_door", "tw\\door.nif", "Door"),
         obj("LIGH", "tw_lantern", "tw\\lantern.nif", "Lantern",
             extra=[esm.sub("LHDT", struct.pack("<fiiIII", 1.0, 5, -1, 384, 0x0060C0FF, 0x0008))]),
         obj("MISC", "tw_coin", "tw\\crate.nif", "Coin"),
-        esm.record("RACE", [esm.sub("NAME", esm.zs("tw_folk")), esm.sub("FNAM", esm.zs("Folk")),
-                            esm.sub("RADT", bytes(136) + struct.pack("<i", 1))]),
+        race_record("tw_folk", "Folk", [(5, 10), (19, 5)], [40, 40, 40, 40, 40, 40, 40, 40], 1,
+                    ["tw_power"]),
+        race_record("tw_beast", "Shore-Kin", [(20, 15), (8, 10)], [40, 35, 35, 50, 50, 40, 30, 40], 3, []),
         esm.record("CREA", [esm.sub("NAME", esm.zs("tw_critter")),
                             esm.sub("MODL", esm.zs("tw\\critter.nif")),
-                            esm.sub("FNAM", esm.zs("Shore Critter"))]),
+                            esm.sub("FNAM", esm.zs("Shore Critter")),
+                            esm.sub("NPDT", struct.pack("<24i", 0, 2, 30, 20, 20, 40, 40, 30, 20, 30,
+                                                        30, 0, 40, 25, 30, 0, 20, 2, 6, 1, 4, 1, 3, 0)),
+                            esm.sub("FLAG", struct.pack("<i", 0x8)),
+                            esm.sub("AIDT", bytes([0, 0, 40, 30, 0, 0, 0, 0]) + struct.pack("<I", 0)),
+                            esm.sub("NPCO", struct.pack("<i", 1) + esm.zs("tw_root").ljust(32, b"\0"))]),
     ]
     for bid, (part, female, key, _rigid) in PARTS.items():
         recs.append(esm.record("BODY", [
             esm.sub("NAME", esm.zs(bid)), esm.sub("MODL", esm.zs(key.replace("/", "\\") + ".nif")),
             esm.sub("FNAM", esm.zs("tw_folk")),
             esm.sub("BYDT", bytes((part, 0, 1 if female else 0, 0)))]))
-    for nid, name, female, cls, fac, disp, script in (
-            ("tw_villager", "Hamlet Elder", False, "tw_elder", "", 50, ""),
-            ("tw_villager_f", "Hamlet Weaver", True, "tw_weaver", "tw_weavers", 40, "tw_weaver_script")):
+    for nid, name, female, cls, fac, disp, script, services, gold in (
+            ("tw_villager", "Hamlet Elder", False, "tw_elder", "", 50, "",
+             0x1 | 0x2 | 0x800 | 0x4000 | 0x8000 | 0x10000 | 0x20000, 300),
+            ("tw_villager_f", "Hamlet Weaver", True, "tw_weaver", "tw_weavers", 40, "tw_weaver_script",
+             0x4 | 0x10 | 0x100 | 0x400 | 0x2000, 200)):
         subs = [esm.sub("NAME", esm.zs(nid)), esm.sub("FNAM", esm.zs(name)),
                 esm.sub("RNAM", esm.zs("tw_folk")), esm.sub("CNAM", esm.zs(cls)),
                 esm.sub("BNAM", esm.zs("tw_folk_head")),
-                esm.sub("NPDT", struct.pack("<hBBbxxxi", 3, disp, 5, 2 if fac else 0, 25)),
-                esm.sub("FLAG", struct.pack("<i", 1 if female else 0))]
+                esm.sub("NPDT", struct.pack("<hBBbxxxi", 3, disp, 5, 2 if fac else 0, gold)),
+                esm.sub("FLAG", struct.pack("<i", (1 if female else 0) | 0x10)),
+                esm.sub("AIDT", bytes([30, 0, 20, 30, 0, 0, 0, 0]) + struct.pack("<I", services))]
+        if nid == "tw_villager":
+            for sp in ("tw_spark", "tw_heal", "tw_bolt"):
+                subs.append(esm.sub("NPCS", sp.encode("latin-1").ljust(32, b"\0")))
+            subs.append(esm.sub("DODT", struct.pack("<6f", 0.0, -300.0, 0.0, 0.0, 0.0, 0.0)))
+            subs.append(esm.sub("DNAM", esm.zs(CELLAR)))
         if fac:
             subs.append(esm.sub("ANAM", esm.zs(fac)))
         if script:
@@ -783,6 +922,9 @@ def build_esm() -> List[bytes]:
             index += 1
         if (cx, cy) == (0, 0):
             subs += ref_subs(index, "tw_house", house_pos, (0.0, 0.0, 0.0))
+            index += 1
+            subs += ref_subs(index, "divinemarker", (house_pos[0] - 600.0, house_pos[1] - 700.0,
+                                                    terrain_height(house_pos[0] - 600.0, house_pos[1] - 700.0)))
             index += 1
             subs += ref_subs(index, "tw_door", (door_out[0], door_out[1] + 8, door_out[2]),
                              door=(0.0, -420.0, 16.0, 0.0, 0.0, 0.0), dest_cell=CELLAR)

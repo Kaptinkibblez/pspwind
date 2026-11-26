@@ -10,6 +10,7 @@ tests/host/world_test
 tests/host/game_test
 tests/host/rpg_test
 tests/host/ui_test
+tests/host/mech_test
 
 # Python
 __pycache__/

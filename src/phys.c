@@ -652,9 +652,13 @@ void phys_move(PhysWorld *pw, PhysBody *b, const Vec4 *wish, int jump, float jum
         return;
     }
 
-    /* swimming: chest below the surface */
-    b->swimming = (uint8_t)(pw->has_water && b->pos.z + b->height * 0.7f < pw->water_z);
-    if (b->swimming) {
+    /* swimming: chest below the surface (never while levitating or water walking) */
+    b->swimming = (uint8_t)(!b->levitate && !b->water_walk && pw->has_water &&
+                            b->pos.z + b->height * 0.7f < pw->water_z);
+    if (b->levitate) {
+        b->vel.z = wish->z;
+        b->on_ground = 0;
+    } else if (b->swimming) {
         b->vel.z = wish->z;
         if (wish->z == 0.0f && b->pos.z + b->height * 0.8f < pw->water_z)
             b->vel.z = 60.0f; /* buoyancy */
@@ -666,7 +670,8 @@ void phys_move(PhysWorld *pw, PhysBody *b, const Vec4 *wish, int jump, float jum
             b->on_ground = 0;
         }
         if (!b->on_ground) {
-            b->vel.z -= PHYS_GRAVITY * dt;
+            float g = (b->fall_mult > 0.0f && b->vel.z < 0.0f) ? PHYS_GRAVITY * b->fall_mult : PHYS_GRAVITY;
+            b->vel.z -= g * dt;
             if (b->vel.z < -PHYS_MAX_FALL_SPEED)
                 b->vel.z = -PHYS_MAX_FALL_SPEED;
         }
@@ -720,6 +725,14 @@ void phys_move(PhysWorld *pw, PhysBody *b, const Vec4 *wish, int jump, float jum
         }
     } else {
         b->on_ground = 0;
+    }
+
+    /* water walking: the surface carries the player */
+    if (b->water_walk && pw->has_water && b->pos.z < pw->water_z && b->vel.z <= 0.0f &&
+        (!found || ground < pw->water_z)) {
+        b->pos.z = pw->water_z;
+        b->vel.z = 0.0f;
+        b->on_ground = 1;
     }
 
     /* slopes too steep to stand on: slide down them */

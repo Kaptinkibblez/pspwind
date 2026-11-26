@@ -9,7 +9,7 @@
 
 #include "mem.h"
 
-#define SPELL_SALT 0x5bd1e995u
+#define SPELL_SALT VM_SPELL_SALT
 #define VM_NOT_FOUND (-1)
 
 static const int month_days[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
@@ -261,59 +261,178 @@ int vm_disabled(Vm *vm, uint32_t key)
 
 int vm_disposition(Vm *vm, const VmRef *ref)
 {
-    float d = vm_prop(vm, ref, MWP_DISPOSITION);
+    float d = vm_stat(vm, ref, MWP_DISPOSITION);
     return (int)PW_CLAMP(d, 0.0f, 100.0f);
 }
 
 /* ------------------------------------------------------------------------ */
 /* inventories                                                              */
 /* ------------------------------------------------------------------------ */
-static uint32_t item_slot(const Vm *vm, uint32_t owner, uint32_t item, int *found)
+static uint32_t item_hash(uint32_t owner, uint32_t item)
 {
-    uint32_t h = (owner * 0x9E3779B1u) ^ (item * 0x27D4EB2Fu);
-    uint32_t i, mask = VM_ITEM_SLOTS - 1u;
+    return (owner * 0x9E3779B1u) ^ (item * 0x27D4EB2Fu);
+}
+
+/* Stacks of one (owner, item) share a probe start, and slots are never
+ * freed, so all of them sit in the probe cluster before the first empty slot. */
+static int item_find(const Vm *vm, uint32_t owner, uint32_t item, uint16_t variant, uint32_t *empty)
+{
+    uint32_t h = item_hash(owner, item), i, mask = VM_ITEM_SLOTS - 1u;
     for (i = 0; i < VM_ITEM_SLOTS; ++i) {
         uint32_t s = (h + i) & mask;
         const VmItem *it = &vm->items[s];
         if (it->owner == 0 && it->item == 0) {
-            *found = 0;
-            return s;
+            if (empty)
+                *empty = s;
+            return -1;
         }
-        if (it->owner == owner && it->item == item) {
-            *found = 1;
-            return s;
-        }
+        if (it->owner == owner && it->item == item && it->variant == variant)
+            return (int)s;
     }
-    *found = 0;
-    return VM_ITEM_SLOTS;
+    if (empty)
+        *empty = VM_ITEM_SLOTS;
+    return -1;
 }
 
 int32_t vm_item_count(Vm *vm, uint32_t owner, uint32_t item)
 {
-    int found;
-    uint32_t s = item_slot(vm, owner, item, &found);
-    return found ? vm->items[s].count : 0;
+    uint32_t h = item_hash(owner, item), i, mask = VM_ITEM_SLOTS - 1u;
+    int32_t total = 0;
+    for (i = 0; i < VM_ITEM_SLOTS; ++i) {
+        const VmItem *it = &vm->items[(h + i) & mask];
+        if (it->owner == 0 && it->item == 0)
+            break;
+        if (it->owner == owner && it->item == item)
+            total += it->count;
+    }
+    return total;
+}
+
+VmItem *vm_item_at(Vm *vm, int slot)
+{
+    return (slot >= 0 && slot < VM_ITEM_SLOTS) ? &vm->items[slot] : NULL;
+}
+
+static int new_stack(Vm *vm, uint32_t owner, uint32_t item, uint16_t variant, uint32_t slot)
+{
+    VmItem *it;
+    if (slot >= VM_ITEM_SLOTS) {
+        vm_error(vm, "inventory store full");
+        return -1;
+    }
+    it = &vm->items[slot];
+    memset(it, 0, sizeof(*it));
+    it->owner = owner;
+    it->item = item;
+    it->variant = variant;
+    it->health = VM_FULL;
+    it->charge = -1.0f;
+    vm->item_count++;
+    return (int)slot;
+}
+
+static int object_instance(Vm *vm, uint32_t object);
+
+static void items_changed(Vm *vm, uint32_t owner, uint32_t item)
+{
+    if (owner == vm->player_hash) {
+        /* scripts on carried items run every frame (OnPCAdd/OnPCDrop locals) */
+        const DRpgObject *o = rpgdb_object(vm->db, item);
+        if (o && o->script != DRPG_NONE16) {
+            int vmi = object_instance(vm, item);
+            if (vmi >= 0) {
+                if (vm_item_count(vm, owner, item) > 0)
+                    vm->inst[vmi].flags |= VMI_INVENTORY;
+                else
+                    vm->inst[vmi].flags &= (uint16_t)~VMI_INVENTORY;
+            }
+        }
+    }
+    if (vm->notify_change && owner) {
+        VmRef r;
+        memset(&r, 0, sizeof(r));
+        r.kind = owner == vm->player_hash ? VM_REF_PLAYER : VM_REF_OBJECT;
+        r.key = owner;
+        r.vmi = -1;
+        r.inst = -1;
+        vm->notify_change(vm->mech, VMN_ITEMS, &r, item);
+    }
 }
 
 void vm_item_add(Vm *vm, uint32_t owner, uint32_t item, int32_t delta)
 {
-    int found;
-    uint32_t s = item_slot(vm, owner, item, &found);
-    if (s >= VM_ITEM_SLOTS) {
-        vm_error(vm, "inventory store full");
-        return;
-    }
-    if (!found) {
-        if (delta <= 0)
+    uint32_t empty = VM_ITEM_SLOTS;
+    int s = item_find(vm, owner, item, 0, &empty);
+    if (delta > 0) {
+        if (s < 0)
+            s = new_stack(vm, owner, item, 0, empty);
+        if (s < 0)
             return;
-        vm->items[s].owner = owner;
-        vm->items[s].item = item;
-        vm->items[s].count = 0;
-        vm->item_count++;
+        vm->items[s].count += delta;
+    } else if (delta < 0) {
+        uint32_t h = item_hash(owner, item), i, mask = VM_ITEM_SLOTS - 1u;
+        int32_t left = -delta;
+        if (s >= 0) {
+            int32_t take = PW_MIN(left, vm->items[s].count);
+            vm->items[s].count -= take;
+            left -= take;
+        }
+        for (i = 0; i < VM_ITEM_SLOTS && left > 0; ++i) {
+            VmItem *it = &vm->items[(h + i) & mask];
+            int32_t take;
+            if (it->owner == 0 && it->item == 0)
+                break;
+            if (it->owner != owner || it->item != item)
+                continue;
+            take = PW_MIN(left, it->count);
+            it->count -= take;
+            left -= take;
+        }
+    }
+    items_changed(vm, owner, item);
+}
+
+int vm_item_add_state(Vm *vm, uint32_t owner, uint32_t item, int32_t delta, uint16_t health,
+                      float charge, uint32_t soul)
+{
+    uint32_t h = item_hash(owner, item), i, mask = VM_ITEM_SLOTS - 1u, empty = VM_ITEM_SLOTS;
+    uint16_t next_variant = 1;
+    int s = -1;
+    if (health == VM_FULL && charge < 0.0f && soul == 0) {
+        s = item_find(vm, owner, item, 0, &empty);
+    } else {
+        for (i = 0; i < VM_ITEM_SLOTS; ++i) {
+            uint32_t k = (h + i) & mask;
+            const VmItem *it = &vm->items[k];
+            if (it->owner == 0 && it->item == 0) {
+                empty = k;
+                break;
+            }
+            if (it->owner != owner || it->item != item)
+                continue;
+            if (it->variant >= next_variant)
+                next_variant = (uint16_t)(it->variant + 1);
+            if (it->variant && it->health == health && it->soul == soul &&
+                (it->charge == charge || (it->charge < 0.0f && charge < 0.0f)))
+                s = (int)k;
+        }
+    }
+    if (s < 0) {
+        if (delta <= 0)
+            return -1;
+        s = new_stack(vm, owner, item, (health == VM_FULL && charge < 0.0f && soul == 0) ? 0 : next_variant,
+                      empty);
+        if (s < 0)
+            return -1;
+        vm->items[s].health = health;
+        vm->items[s].charge = charge;
+        vm->items[s].soul = soul;
     }
     vm->items[s].count += delta;
     if (vm->items[s].count < 0)
         vm->items[s].count = 0;
+    items_changed(vm, owner, item);
+    return s;
 }
 
 int vm_item_next(Vm *vm, uint32_t owner, uint32_t *cursor, uint32_t *item, int32_t *count)
@@ -365,6 +484,23 @@ static void seed_ref(Vm *vm, const VmRef *ref)
 {
     if (ref && ref->kind != VM_REF_NONE)
         seed_reference(vm, ref->key, ref->object);
+}
+
+void vm_seed(Vm *vm, const VmRef *ref)
+{
+    seed_ref(vm, ref);
+}
+
+float vm_stat(Vm *vm, const VmRef *ref, int prop)
+{
+    float raw = vm_prop(vm, ref, prop);
+    return vm->stat_get ? vm->stat_get(vm->mech, ref, prop, raw) : raw;
+}
+
+static void spells_changed(Vm *vm, const VmRef *ref, uint32_t spell)
+{
+    if (vm->notify_change)
+        vm->notify_change(vm->mech, VMN_SPELLS, ref, spell);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -421,6 +557,26 @@ static int object_instance(Vm *vm, uint32_t object)
     if (!o || o->script == DRPG_NONE16)
         return VM_NOT_FOUND;
     return new_instance(vm, object, object, o->script, 0);
+}
+
+int vm_set_local(Vm *vm, uint32_t object, const char *name, float value)
+{
+    const DRpgVar *var;
+    int vmi = object_instance(vm, object);
+    VmValue *slot;
+    if (vmi < 0)
+        return 0;
+    var = rpgdb_script_var(vm->db, vm->inst[vmi].script, pw_hash_name(name));
+    if (!var || var->slot >= instance_nlocals(vm, &vm->inst[vmi]))
+        return 0;
+    slot = &vm->locals[vm->inst[vmi].locals + var->slot];
+    if (var->type == DRPG_VT_FLOAT)
+        slot->f = value;
+    else if (var->type == DRPG_VT_SHORT)
+        slot->i = (int16_t)value;
+    else
+        slot->i = (int32_t)value;
+    return 1;
 }
 
 void vm_unload_zone(Vm *vm)
@@ -801,6 +957,49 @@ static const char *rank_name(Vm *vm, uint32_t faction, int rank)
     return rpgdb_name(vm->db, f->rank_name[rank]);
 }
 
+uint32_t vm_pc_race(const Vm *vm)
+{
+    if (vm->pc_race)
+        return vm->pc_race;
+    if (vm->db->hdr && vm->db->hdr->player != DRPG_NONE)
+        return vm->db->objects[vm->db->hdr->player].link[0];
+    return 0;
+}
+
+uint32_t vm_pc_class(const Vm *vm)
+{
+    if (vm->pc_class)
+        return vm->pc_class;
+    if (vm->db->hdr && vm->db->hdr->player != DRPG_NONE)
+        return vm->db->objects[vm->db->hdr->player].link[1];
+    return 0;
+}
+
+int vm_pc_female(const Vm *vm)
+{
+    if (vm->pc_female >= 0)
+        return vm->pc_female;
+    if (vm->db->hdr && vm->db->hdr->player != DRPG_NONE)
+        return vm->db->objects[vm->db->hdr->player].sex;
+    return 0;
+}
+
+uint32_t vm_random(Vm *vm)
+{
+    return rng_next(vm);
+}
+
+float vm_random01(Vm *vm)
+{
+    return (float)(rng_next(vm) >> 8) / 16777216.0f;
+}
+
+void vm_advance_hours(Vm *vm, float hours)
+{
+    if (vm->timescale > 0.0f)
+        advance_time(vm, hours * 3600.0f / vm->timescale);
+}
+
 static const DRpgObject *player_object(const Vm *vm)
 {
     if (vm->db->hdr && vm->db->hdr->player != DRPG_NONE)
@@ -827,9 +1026,9 @@ void vm_fix_defines(Vm *vm, char sigil, const char *in, char *out, uint32_t cap,
             if (ci_starts_with(k, "pcname")) {
                 rep = vm->pc_name, skip = 6;
             } else if (ci_starts_with(k, "pcrace")) {
-                rep = pc ? class_name(vm, pc->link[0]) : "", skip = 6;
+                rep = pc ? class_name(vm, vm_pc_race(vm)) : "", skip = 6;
             } else if (ci_starts_with(k, "pcclass")) {
-                rep = pc ? class_name(vm, pc->link[1]) : "", skip = 7;
+                rep = pc ? class_name(vm, vm_pc_class(vm)) : "", skip = 7;
             } else if (ci_starts_with(k, "pcrank")) {
                 rep = rank_name(vm, sp_faction, vm_pc_rank(vm, sp_faction)), skip = 6;
             } else if (ci_starts_with(k, "nextpcrank")) {
@@ -1023,7 +1222,7 @@ static int family_verb(Vm *vm, uint16_t func, const VmRef *ref, const VmValue *a
     switch (fam) {
     case MWFAM_GET:
     case MWFAM_GET_PC:
-        v = prop == MWP_DISPOSITION ? (float)vm_disposition(vm, ref) : vm_prop(vm, ref, prop);
+        v = prop == MWP_DISPOSITION ? (float)vm_disposition(vm, ref) : vm_stat(vm, ref, prop);
         if (fi->ret == 'f')
             ret->f = v;
         else
@@ -1051,7 +1250,8 @@ static int family_verb(Vm *vm, uint16_t func, const VmRef *ref, const VmValue *a
         return 1;
     }
     case MWFAM_RATIO: {
-        float base = vm_prop(vm, ref, prop - MWP_DYN_HEALTH + MWP_DYNBASE_HEALTH);
+        float base = vm->stat_max ? vm->stat_max(vm->mech, ref, prop)
+                                  : vm_prop(vm, ref, prop - MWP_DYN_HEALTH + MWP_DYNBASE_HEALTH);
         ret->f = base > 0.0f ? vm_prop(vm, ref, prop) / base : 0.0f;
         return 1;
     }
@@ -1199,6 +1399,7 @@ static int builtin(Vm *vm, VmCtx *ctx, uint16_t func, const VmRef *ref, const Vm
             } else {
                 vm_item_add(vm, ref->key ^ SPELL_SALT, sp, -1);
             }
+            spells_changed(vm, ref, sp);
         }
         return 1;
     case MWF_GETSPELL:
@@ -1294,7 +1495,10 @@ static int builtin(Vm *vm, VmCtx *ctx, uint16_t func, const VmRef *ref, const Vm
         const DRpgObject *o = vm_ref_object(vm, ref);
         if (ref->kind == VM_REF_PLAYER)
             o = player_object(vm);
-        ret->i = (o && o->type == DRPG_OT_NPC && o->link[0] == arg_hash(ctx, args, argc, 0));
+        if (ref->kind == VM_REF_PLAYER)
+            ret->i = vm_pc_race(vm) == arg_hash(ctx, args, argc, 0);
+        else
+            ret->i = (o && o->type == DRPG_OT_NPC && o->link[0] == arg_hash(ctx, args, argc, 0));
         return 1;
     }
     case MWF_GETDEADCOUNT: {
@@ -1850,7 +2054,8 @@ void vm_tick(Vm *vm, float dt)
 {
     uint32_t i, n;
     vm->frame_dt = dt;
-    advance_time(vm, dt);
+    if (!vm->menu_mode)
+        advance_time(vm, dt); /* time stands still while menus are open */
     n = vm->inst_count; /* instances created during the tick run next frame */
     for (i = 0; i < n; ++i) {
         VmInstance *in = &vm->inst[i];
@@ -1858,6 +2063,8 @@ void vm_tick(Vm *vm, float dt)
             if (in->flags & VMI_RUNNING)
                 vm_run_instance(vm, i);
         } else if ((in->flags & VMI_LOADED) && !vm_disabled(vm, in->key)) {
+            vm_run_instance(vm, i);
+        } else if (in->flags & VMI_INVENTORY) {
             vm_run_instance(vm, i);
         }
     }
@@ -1936,6 +2143,8 @@ void vm_new_game(Vm *vm)
     vm->errors = vm->unhandled = vm->runs = 0;
     vm->last_error[0] = '\0';
     vm->rng = 0x2545F491u;
+    vm->pc_race = vm->pc_class = 0;
+    vm->pc_female = -1;
     vm->g_hour = vm_global_index(vm, "gamehour");
     vm->g_day = vm_global_index(vm, "day");
     vm->g_month = vm_global_index(vm, "month");

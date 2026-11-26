@@ -10,8 +10,13 @@
  * Controls while a window is open:
  *   Dialogue  up/down choose, left/right switch topic list / text links,
  *             cross ask / follow link / answer, circle goodbye, L/R scroll
- *   Menu      SELECT opens; L/R switch tabs (Journal, Quests, Topics),
- *             up/down move, cross open, circle back / close
+ *   Menu      SELECT opens; L/R switch tabs (Stats, Inventory, Magic, Map,
+ *             Journal), up/down move, cross use / select / open,
+ *             left/right inventory filter, triangle rest (Stats) or next
+ *             journal page, circle back / close
+ *   Trade     loot, barter, services, alchemy, repair, spellmaking and
+ *             enchanting screens (ui_trade.c); character creation, level
+ *             up, rest and death (ui_char.c)
  *   Book      up/down or L/R scroll, square take, cross/circle close
  *   Message   left/right choose a button, cross confirm
  */
@@ -57,8 +62,15 @@ void ui_render_rgba(const UiCanvas *c, uint32_t *pixels, int stride);
 void ui_render_gu(const UiCanvas *c);
 
 /* ------------------------------------------------------------------ state */
-enum { UI_NONE = 0, UI_DIALOGUE, UI_MENU, UI_BOOK };
-enum { UI_TAB_JOURNAL = 0, UI_TAB_QUESTS, UI_TAB_TOPICS, UI_TAB_COUNT };
+enum { UI_NONE = 0, UI_DIALOGUE, UI_MENU, UI_BOOK, UI_LOOT, UI_BARTER, UI_SERVICE, UI_ALCHEMY,
+       UI_REPAIR, UI_SPELLMAKING, UI_ENCHANT, UI_CHARGEN, UI_LEVELUP, UI_REST, UI_DEATH };
+/* SELECT menu tabs */
+enum { UI_TAB_STATS = 0, UI_TAB_INVENTORY, UI_TAB_MAGIC, UI_TAB_MAP, UI_TAB_JOURNAL, UI_TAB_COUNT };
+/* journal pages (triangle cycles) */
+enum { UI_J_ENTRIES = 0, UI_J_QUESTS, UI_J_TOPICS, UI_J_COUNT };
+/* dialogue services */
+enum { UI_SVC_PERSUADE = 0, UI_SVC_BARTER, UI_SVC_SPELLS, UI_SVC_TRAINING, UI_SVC_REPAIR, UI_SVC_TRAVEL,
+       UI_SVC_SPELLMAKING, UI_SVC_ENCHANT, UI_SVC_COUNT };
 
 #define UI_DOC_LINES 1024
 #define UI_DOC_SEGS 512
@@ -121,6 +133,50 @@ typedef struct {
     char toast[UI_TOASTS][96];
     float toast_time[UI_TOASTS];
     UiDoc doc;
+    /* M5: menus, trade, services, crafting, character */
+    int jtab;                  /* journal page */
+    int filter;                /* inventory filter */
+    int32_t stacks[256];       /* listed item stacks (left column) */
+    uint32_t stack_count;
+    int32_t stacks2[256];      /* right column (player side of loot / barter) */
+    uint32_t stack2_count;
+    int column, sel2, top2;
+    uint32_t spells[96];       /* magic tab / spell merchants */
+    uint32_t spell_count;
+    uint8_t spell_kind[96];    /* 0 power, 1 spell, 2 item */
+    int svc[UI_SVC_COUNT];     /* services offered in the open dialogue */
+    int svc_count;
+    int service;               /* UI_SVC_* shown in UI_SERVICE */
+    int svc_lines[16];
+    int svc_line_count;
+    VmRef npc;                 /* trade partner / container */
+    int return_mode;
+    RpgAlchemy alch;
+    RpgEnchant ench;
+    DRpgEffect fx[8];
+    int fx_count, fx_sel, fx_field;
+    uint8_t known_fx[RPGDB_EFFECTS];
+    char name[32];
+    int kb_active, kb_sel;
+    int repair_tool;
+    /* character creation */
+    uint32_t cg_steps;         /* GAME_CG_* still to show */
+    int cg_step;
+    int cg_female;
+    uint32_t cg_race, cg_class, cg_sign;
+    uint32_t cg_items[64];
+    uint32_t cg_count;
+    /* level up */
+    int lv_pick[3];
+    int lv_count;
+    /* rest */
+    int rest_hours;
+    int rest_sleep;
+    /* map panning (cells from the centre) */
+    int map_dx, map_dy;
+    /* status line inside screens */
+    char status[96];
+    float status_time;
 } Ui;
 
 void ui_init(Ui *ui, Game *g);

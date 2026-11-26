@@ -125,7 +125,8 @@ static int run_selftests(void)
 /* ------------------------------------------------------------------------ */
 /* app state                                                                */
 /* ------------------------------------------------------------------------ */
-enum { MENU_RESUME, MENU_SCHEME, MENU_INVERT, MENU_CULL, MENU_OVERLAY, MENU_FLY, MENU_QUIT, MENU_COUNT };
+enum { MENU_RESUME, MENU_SCHEME, MENU_INVERT, MENU_CULL, MENU_OVERLAY, MENU_FLY, MENU_ANIM, MENU_QUIT,
+       MENU_COUNT };
 
 typedef struct {
     World world;
@@ -149,25 +150,11 @@ static void hud(void *user)
 {
     App *a = (App *)user;
     const Game *g = &a->game;
-    const char *label = game_target_label(g);
     static const char *cull_names[] = { "CW", "CCW", "off" };
-    int windowed = ui_active(&a->ui);
+    /* crosshair, target, messages and stat bars are drawn by ui_draw_hud;
+     * the debug screen only carries errors, the overlay and the pause menu */
     pspDebugScreenEnableBackColor(0);
     pspDebugScreenSetTextColor(0xFFFFFFFF);
-    if (!windowed) {
-        pspDebugScreenSetXY(29, 16);
-        pspDebugScreenPrintf("+");
-    }
-    if (label && !a->paused && !windowed) {
-        pspDebugScreenSetTextColor(0xFF80E0FF);
-        pspDebugScreenSetXY(34 - (int)(strlen(label) + 4) / 2, 19);
-        pspDebugScreenPrintf("[R] %.40s", label);
-    }
-    if (g->message_time > 0.0f && !windowed) {
-        pspDebugScreenSetTextColor(0xFFC0F0C0);
-        pspDebugScreenSetXY(1, 31);
-        pspDebugScreenPrintf("%.66s", g->message);
-    }
     if (a->error[0]) {
         pspDebugScreenSetTextColor(0xFF4060FF);
         pspDebugScreenSetXY(1, 32);
@@ -199,7 +186,8 @@ static void hud(void *user)
     }
     if (a->paused) {
         static const char *items[MENU_COUNT] = { "Resume", "Controls", "Invert look", "Face culling",
-                                                 "Debug overlay", "Fly (debug)", "Quit" };
+                                                 "Debug overlay", "Fly (debug)", "Next animation",
+                                                 "Quit" };
         int i;
         pspDebugScreenSetTextColor(0xFFFFFFFF);
         pspDebugScreenSetXY(26, 9);
@@ -299,6 +287,9 @@ static int pause_menu(App *a, const InputState *in)
         case MENU_FLY:
             game_set_flying(g, !g->flying);
             break;
+        case MENU_ANIM:
+            game_debug_cycle_animation(g, (in->pressed & GB_LEFT) ? -1 : 1);
+            break;
         case MENU_QUIT:
             return 1;
         default:
@@ -357,6 +348,11 @@ static void run(App *a, const char *data_dir)
         zi = 0;
     if (enter_zone(a, (uint32_t)zi, NULL, NULL) != 0 && world_zone_count(&a->world) > 1)
         enter_zone(a, 1, NULL, NULL);
+    /* without a CharGen script the character is created up front */
+    if (a->game.rpg && a->game.menus_enabled == GAME_MENU_ALL && !a->rpg.rpg.chargen_done) {
+        a->game.ui_event = GAME_UI_CHARGEN;
+        a->game.ui_chargen = GAME_CG_ALL;
+    }
 
     sceCtrlSetSamplingCycle(0);
     sceCtrlSetSamplingMode(PSP_CTRL_MODE_ANALOG);

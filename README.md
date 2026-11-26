@@ -33,17 +33,24 @@ src/                     PSP runtime (C99)
   rpgdb.c/.h             rpg.dpak: validated tables, text-block LRU cache, script paging
   vm.c/.h                MWScript bytecode VM + scripted state (journal, stats, inventories)
   mwfuncs.c/.h           generated MWScript verb ids/signatures (gen_mwfuncs.py)
-  dialogue.c/.h          info filtering, greetings, topics, choices, hyperlinks
-  ui.c/.h, ui_gu.c       8x8-font console UI: dialogue, journal, books, message boxes
+  dialogue.c/.h          info filtering, greetings, topics, choices, hyperlinks, persuasion answers
+  rpg.c/.h               character mechanics: stats, progression, magic effects, death, rest, chargen
+  rpg_items.c            stacks, equipment, casting, combat, lock picking, item use
+  rpg_trade.c            barter, services (training, spells, repair, travel), persuasion, crafting
+  ui.c/.h, ui_gu.c       8x8-font console UI core: dialogue + services, journal, books, message boxes
+  ui_menu.c              SELECT menu tabs: Stats, Inventory, Magic, Map
+  ui_trade.c             loot, barter, service, alchemy, repair, spellmaking, enchanting screens
+  ui_char.c              character creation, level up, rest/wait, death, in-game HUD
   font8x8.h              MSX 8x8 font (PSPSDK)
   selftest.c/.h          allocator + VFPU-vs-scalar test suite (host and device)
-  main.c                 boot, PSP input, pause menu, HUD, frame loop
+  main.c                 boot, PSP input, pause menu, debug overlay, frame loop
 tests/host/              native build of the portable runtime code + test runner
 tools/demake_cooker/     Python 3 + Pillow offline cooker
   cook_all.py            runs the whole pipeline (meshes -> anims -> world -> rpg -> textures)
   rpg_compiler.py        ESM records -> rpg.dpak (dialogue, journal, scripts, items, spells...)
   mwscript.py            MWScript compiler -> bytecode (+ disassembler)
   mwsig.py               MWScript verb signatures; gen_mwfuncs.py writes src/mwfuncs.h
+  mwdata.py              engine constants: 143 magic effects + flags, resistances, skills, markers
   tex_demaker.py         textures -> DTEX (T4/T8, swizzled) + icon atlases
   mesh_demaker.py        NIF -> DMESH (decimated, segmented skins, collision)
   anim_demaker.py        KF -> DANIM (text-key groups, 15 fps, root motion -> speed)
@@ -98,8 +105,10 @@ runs the shared self-test suite; `tools-test` runs the cooker unit tests;
 real C loader (plus validator fuzzing) and plays it through `game.c` with
 scripted input (walking, collision, jumping, doors, swimming, zone borders,
 NPC animation), runs the RPG layer on the cooked `rpg.dpak` (`rpg_test`:
-quest via the dialogue engine + bytecode fuzzing) and plays the test quest
-through the UI with button presses (`ui_test`, screenshots in
+quest via the dialogue engine + bytecode fuzzing; `mech_test`: character
+creation, levelling, combat, magic, items, trade, services and crafting
+numbers against Morrowind's formulas) and plays the test quest plus every M5
+screen through the UI with button presses (`ui_test`, screenshots in
 `build/host/screens/`). None of them needs the PSP toolchain.
 
 ## Cooking assets
@@ -141,9 +150,12 @@ make package
 
 Generates an original test world (`make_testworld.py`: hills, a shoreline, a
 hamlet, a cellar behind a door, and a small quest — talk to the Hamlet
-Weaver about her lost ring), cooks it, and puts `EBOOT.PBP` plus the
+Weaver about her lost ring; the Hamlet Elder sells spells, trains, repairs,
+makes spells, enchants and "travels" you to the cellar, the Weaver barters,
+a crate and a critter can be looted), cooks it, and puts `EBOOT.PBP` plus the
 cooked data in `build/psp/pspwind/` — copy that folder to `ms0:/PSP/GAME/`
-or load the EBOOT in PPSSPP.
+or load the EBOOT in PPSSPP. A new game starts with character creation
+(name, race and sex, class, birthsign, review).
 
 ![Software preview of the cooked test hamlet](docs/img/testworld_hamlet_preview.png)
 ![Villager mid-stride (walk animation, segmented limbs)](docs/img/testworld_walk_side.png)
@@ -156,16 +168,34 @@ looks and the face buttons walk):
 | analog stick | walk / strafe |
 | △ / ✕ | look up / down |
 | □ / ○ | turn left / right |
-| R | activate (doors, NPCs, containers, items) |
+| R | activate (doors, NPCs, containers, corpses, items); with a weapon ready hold to wind up and release to strike (bows shoot, a readied lockpick picks the targeted lock); with magic ready cast |
 | L | jump |
 | D-pad ↑ / ↓ | run–walk toggle / sneak |
-| D-pad ← / → | cycle the nearest actor's animation (debug) |
-| SELECT | journal (L/R: Journal, Quests, Topics; ✕ open, ○ back) |
-| START | pause menu: controls A/B, invert look, face culling, debug overlay, fly mode (debug), quit |
+| D-pad ← | ready / sheathe the weapon |
+| D-pad → | ready / put away the selected spell, power or enchanted item |
+| SELECT | menu: L/R switch Stats, Inventory, Magic, Map, Journal |
+| START | pause menu: controls A/B, invert look, face culling, debug overlay, fly mode (debug), next animation (debug), quit |
 
-In dialogue: ↑/↓ choose a topic, ✕ ask, → jump into the hyperlinks of the
-text (↑/↓ between links, ✕ ask, ← back), L/R scroll, ○ goodbye. Books: ↑/↓
-scroll, □ take, ✕ close. Message boxes: ←/→ and ✕.
+Menu tabs: **Stats** (attributes, health/magicka/fatigue, level progress,
+skills by major/minor/misc with progress, factions; △ rest/wait),
+**Inventory** (←/→ filter All/Weapons/Apparel/Magic/Misc, ✕ equip, drink,
+eat, read, use a mortar for alchemy, a hammer to repair, a filled soul gem to
+enchant), **Magic** (powers, spells with cost/chance, enchanted items with
+charge; ✕ selects what D-pad → readies; active effects), **Map** (explored
+exterior cells, your position; D-pad pans, △ recentres), **Journal** (△
+pages: entries, quests, topics; ✕ open, ○ back).
+
+In dialogue: the service entries (Persuasion, Barter, Spells, Training,
+Repair, Travel, Spellmaking, Enchanting — whichever the NPC offers) come
+first, then the topics; ↑/↓ choose, ✕ ask, → jump into the hyperlinks of the
+text (↑/↓ between links, ✕ ask, ← back), L/R scroll, ○ goodbye. Barter and
+loot: ←/→ switch side, ✕ trade one / move a stack, □ trade a stack, △ take
+all. Effect editor (spellmaking, enchanting): ↑/↓ field, ←/→ change (L/R by
+ten), ✕ remove, ○ done. On-screen keyboard: D-pad, ✕ type, □ delete, START
+done. Books: ↑/↓ scroll, □ take, ✕ close. Message boxes: ←/→ and ✕.
+
+![Character creation review](docs/img/ui_chargen_review.png)
+![Inventory](docs/img/ui_inventory.png)
 
 Walking off an exterior zone loads the neighbouring zone behind a loading
 card; activating a door with a destination loads the target cell.

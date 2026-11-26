@@ -5,9 +5,158 @@
 | 1 | Scaffold, Makefile, 32 MB arena (`mem.c`), VFPU math (`vfpu.c`), `tex_demaker.py`, `mesh_demaker.py` | Done |
 | 2 | `world_demaker.py` (17×17 terrain, batched cells) + `zone.c` + fogged `sceGu` renderer (`gfx.c`) | Done |
 | 3 | `phys.c` collision, controls, doors/zone transitions, segmented-limb animation | Done |
-| 4 | `rpg_compiler.py`, MWScript VM (`vm.c`), dialogue + journal UI (`ui.c`) | **Done – awaiting review** |
-| 5 | Combat, magic, inventory/barter/loot UI, character creation, levelling (`rpg.c`) | Not started |
+| 4 | `rpg_compiler.py`, MWScript VM (`vm.c`), dialogue + journal UI (`ui.c`) | Done |
+| 5 | Combat, magic, inventory/barter/loot UI, character creation, levelling (`rpg.c`) | **Done – awaiting review** |
 | 6 | AI (`ai.c`), audio mixer (`audio.c`), save/load (`save.c`), 30/60 FPS pass | Not started |
+
+## Milestone 5 — delivered
+
+All formulas follow OpenMW's implementation of the original rules, read
+from GMSTs in the load order with Morrowind's shipped values as fallbacks.
+
+### Cooker
+* `mwdata.py` — the engine constants that are not in the ESM: all 143 magic
+  effects with their hard-coded flags (generated from OpenMW's table),
+  resisted-by / weakened-by pairs, the 27 skills (GMST names, governing
+  attribute, specialisation, default use gains), school → skill, marker ids.
+* `rpg_compiler.py` writes **DRPG v2**: skill, magic-effect, race, travel
+  and marker tables, birthsign objects, class services merged into NPC
+  services, NPC travel destinations, interior Divine/Almsivi markers, and
+  autocalculated NPC stats (level-scaled attributes, skills, health,
+  magicka, fatigue from race + class + specialisation). See
+  `docs/FORMATS.md`.
+* `gen_mwfuncs.py` also emits `MGEF_*`, `SKILL_*`, `ATTR_*` enums and the
+  extra stat properties (skill progress, level progress, attribute
+  multipliers, damage, dead, book read…).
+
+### Runtime
+* `rpg.c` — the mechanics layer, installed as the VM's stat hook so scripts
+  and dialogue filters see modified values:
+  * stats: attributes/skills with Fortify/Drain/Damage/Absorb, health,
+    magicka (Fortify Maximum Magicka), fatigue, encumbrance and capacity
+    (Burden/Feather), armour rating, walk/run/swim/jump speeds, fatigue
+    term, disposition (race, faction reactions, personality, Charm…).
+  * progression: skill use with per-use gains, major/minor/misc and
+    specialisation multipliers, skill raises, level progress, attribute
+    multipliers (`iLevelUpXXMult`), "rest and meditate", level-up with
+    Endurance-based health gain, skill books.
+  * magic: an active-effect pool with durations, one-shot and per-second
+    application, magnitude rolls, resistances/weaknesses, reflect,
+    absorb, spell absorption, Dispel, Cure *, Mark/Recall, Divine and
+    Almsivi Intervention (to the cooked markers), Open/Lock, Levitate /
+    Water Walking / Jump / Slowfall (fed to `phys.c`), Paralyze, bound
+    weapons and armour (re-equipping what they displaced), soul trap into
+    the smallest fitting empty gem, diseases and curses. Abilities,
+    diseases and constant-effect items are rebuilt as constant effects.
+  * death, natural fatigue regeneration, rest and wait (health and magicka
+    recovery per hour, effects run their course), character creation
+    (race + sex, class, birthsign: attributes, skills, powers, abilities,
+    starting spells chosen like Morrowind's autocalc), visited cells.
+* `rpg_items.c` — item stacks with condition / charge / soul (stacks split
+  when one item changes), 19 equipment slots with two-handed, shield and
+  beast-race rules, auto-equip for NPCs, item value by condition and
+  charge, potions, ingredients (first effect), scrolls, enchanted items
+  (cast on use, on strike, constant), spell cost and success chance with
+  the fatigue term, casting, melee / ranged / hand-to-hand attacks (hit
+  chance, strength and condition damage scaling, critical sneak attacks,
+  armour reduction and wear, blocking, weapon wear, ammunition), lock
+  picking with the Security formula.
+* `rpg_trade.c` — services by record flags, merchant item types, barter
+  prices (disposition, mercantile, personality, luck, fatigue), merchant gold
+  with a daily restock, buying and selling, training (price, skill caps,
+  two game hours), spell merchants, repair prices and self repair with
+  hammers/prongs, travel prices and teleport, persuasion (admire,
+  intimidate, taunt, bribes: temporary and permanent disposition changes),
+  alchemy (apparatus quality, effect visibility by skill, potion strength,
+  value, player-made potions), spellmaking (cost and price, named custom
+  spells), enchanting (points vs. capacity, soul charge, constant effects
+  costed with `fEnchantmentConstantDurationMult`, self-enchant chance,
+  custom enchanted items).
+* `game.c` — combat controls (ready weapon / magic, wind-up and strike,
+  bows consume ammunition, a readied lockpick picks the targeted lock,
+  casting at touch range or along the aim ray with area effects), hostile
+  actors close in and strike (stand-in until the M6 AI), death animation and
+  lootable corpses, containers open the loot screen, hostile NPCs refuse to
+  talk, jumping and fall damage (Acrobatics), encumbrance, `rpg_tick`,
+  respawn, and the script verbs for the character-creation menus,
+  EnableRest/ShowRestMenu, GetWeaponDrawn/GetSpellReadied, Lock/Unlock.
+* `dialogue.c` — Persuasion-type topics (`Admire Success`, `Bribe Fail`…)
+  answer the persuasion menu; `Service Refusal` (disposition test inverted)
+  can refuse services.
+* UI (`ui.c` core, `ui_menu.c`, `ui_trade.c`, `ui_char.c`), all on the 8×8
+  console font:
+  * dialogue lists the NPC's services before the topics.
+  * SELECT menu with five tabs (Stats, Inventory, Magic, Map, Journal);
+    tabs follow the character-creation scripts' `Enable*Menu` calls.
+  * loot (take, put, take all), barter (two columns with prices, one or a
+    stack), persuasion, spells, training, repair, travel, alchemy,
+    self-repair, spellmaking and enchanting with a shared effect editor and
+    an on-screen keyboard for names.
+  * character creation (name, race + sex, class, birthsign, review with
+    jump-back), level up (three attributes with their multipliers), rest /
+    wait (hours, until healed), death screen.
+  * HUD drawn by the UI instead of the debug screen: health / magicka /
+    fatigue bars, readied weapon or spell, wind-up bar, last enemy's health,
+    crosshair, target name, messages, sneaking and level-up hints.
+
+![Character creation](docs/img/ui_chargen_race.png)
+![Stats](docs/img/ui_stats.png)
+![Inventory](docs/img/ui_inventory.png)
+![Magic](docs/img/ui_magic.png)
+![Barter](docs/img/ui_barter.png)
+![Spellmaking](docs/img/ui_spellmaking.png)
+![Alchemy](docs/img/ui_alchemy.png)
+![Level up](docs/img/ui_levelup.png)
+
+### Test world additions
+Rules records (27 SKIL, 29 MGEF), two playable races (one beast) with
+powers, two playable classes (the NPCs' own classes are not playable), two
+birthsigns, abilities, a power, a disease, healing / frost / trap spells,
+a sword, a bound dagger, armour and boots, a shield, potions,
+ingredients, a mortar, a hammer, a lockpick, a soul gem, a scroll and a
+skill book, a crate with gold, a critter carrying a root, an elder who
+sells spells, trains, repairs, makes spells, enchants and travels, a weaver
+who barters, Persuasion-type answers and a Service Refusal, and a Divine
+Intervention marker.
+
+### Verification run
+* `make` → `EBOOT.PBP` (644 KB), zero warnings under `-Werror` (psp-gcc 15
+  also caught an off-by-one in the keyboard table that host gcc missed).
+  Static image 35.0 MB including the 32 MB arena.
+* `make test`: 102 host checks; **128 cooker tests** (adds the v2 tables:
+  skills, magic effects, races and powers, birthsigns, playable classes,
+  travel, markers, NPC autocalc); world test; game test 40/40; rpg test
+  73/73; **mech test 111/111** on the cooked database — chargen numbers
+  (attributes, skills, derived maxima, powers), skill gains and
+  multipliers, level-up, armour rating, beast-race boots, combat to death
+  with weapon wear, creature bites, frost damage over time, a power once
+  per day, potion, scroll, bound dagger expiry, disease and cure, alchemy,
+  barter, training, spell purchase, repair, persuasion, travel, soul trap,
+  enchanting, spellmaking, Mark/Recall/Divine Intervention, Open, lock
+  picking, rest and a skill book; **ui test 167/167** — after the M4 quest
+  it plays character creation, barter (sell and buy back), persuasion with
+  the NPC's answer, buying a spell, making one, travel, equipping,
+  reading a skill book, alchemy from the inventory, the magic and map tabs,
+  looting a crate, killing the critter with the dagger and looting its
+  corpse, resting into a level-up, and death and respawn, all with button
+  presses through `game.c` + `ui.c` like `main.c`, with 22 new screenshots.
+
+### Deferred to their milestones (by design, not stubs)
+* Summoned creatures print a notice instead of appearing; full combat AI,
+  fleeing, guards, crime, stealing/ownership and resting interrupted by
+  wandering creatures arrive with the AI milestone (hostile actors use a
+  simple approach-and-strike loop until then).
+* Death restarts at the zone's entrance with full health: saved games are
+  Milestone 6. Combat and spell sounds come with the audio mixer.
+* Arrows and spells resolve along the aim ray at once (no visible
+  projectile flight).
+
+### Still not verified
+1. Nothing has run on a PSP or in PPSSPP (building an emulator here was
+   blocked in M4). The new screens are verified through the host
+   rasteriser only.
+2. Retail data: the formulas match OpenMW's, but Morrowind's real classes,
+   races, 1 000+ spells and merchants have not been cooked here.
 
 ## Milestone 4 — delivered
 

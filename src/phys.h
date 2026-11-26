@@ -84,6 +84,10 @@ typedef struct {
     uint8_t swimming;
     uint8_t noclip;
     uint8_t steep;  /* standing on a slope too steep to climb */
+    /* magic effects (rpg.c): levitation, water walking, slowed falls */
+    uint8_t levitate;
+    uint8_t water_walk;
+    float fall_mult; /* gravity multiplier while falling (1 = normal, 0 = 1.0 too) */
 } PhysBody;
 
 int phys_build(PhysWorld *pw, const Zone *z);

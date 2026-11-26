@@ -111,8 +111,8 @@ class CookTests(unittest.TestCase):
         self.assertEqual(r["scripts"], 4)
         self.assertEqual(r["script_errors"], {})
         self.assertEqual(r["quests"], 1)
-        self.assertEqual(r["dialogues"], 7)
-        self.assertEqual(r["infos"], 17)
+        self.assertEqual(r["dialogues"], 16)  # 7 topics + 9 Persuasion-type
+        self.assertEqual(r["infos"], 26)
         self.assertEqual(r["result_script_failures"], 0)
         self.assertGreater(r["script_warnings"], 0)  # the deliberately broken script
 
@@ -219,6 +219,80 @@ class CookTests(unittest.TestCase):
         self.assertEqual(fac[14:21], (9, 24, 16, -1, -1, -1, -1))  # favoured skills
         react = self.core["reactions"][fac[23]:fac[23] + fac[22]]
         self.assertEqual(react, [(dmcommon.fnv1a32("tw_weavers"), 2)])
+
+
+    # ------------------------------------------------ DRPG v2 rules tables
+    def test_skills_table(self):
+        import mwdata
+        skills = self.core["skills"]
+        self.assertEqual(len(skills), 27)
+        name = self.core["name"]
+        for i, row in enumerate(skills):
+            self.assertEqual(row[1:3], (mwdata.SKILLS[i][2], mwdata.SKILLS[i][3]), mwdata.SKILLS[i][0])
+        self.assertEqual(name(skills[5][0]), "Long Blade")        # GMST sSkillLongblade fallback
+        self.assertEqual(skills[5][1:3], (0, 0))                   # strength, combat
+        self.assertEqual(skills[16][1:3], (1, 1))                  # alchemy: intelligence, magic
+
+    def test_magic_effects_table(self):
+        import mwdata
+        mgefs = self.core["mgefs"]
+        self.assertEqual(len(mgefs), 143)
+        frost = mgefs[16]
+        self.assertEqual(frost[5], 1)                              # MGEF record present
+        self.assertAlmostEqual(frost[2], 5.0)                      # base cost from the record
+        self.assertEqual(frost[4], 2)                              # destruction
+        self.assertEqual(frost[6], mwdata.RESISTED_BY[16])        # resisted by Resist Frost
+        self.assertTrue(frost[1] & mwdata.MF_HARMFUL)              # hard-coded flag merged in
+        self.assertTrue(frost[1] & 0x200)                          # spellmaking (record flags)
+        missing = mgefs[1]                                         # no MGEF record in the test world
+        self.assertEqual(missing[5], 0)
+        self.assertEqual(self.core["name"](frost[0]), "Frost Damage")
+
+    def test_races_table(self):
+        races = self.core["races"]
+        self.assertEqual([r[0] for r in races], sorted(r[0] for r in races))
+        by = {r[0]: r for r in races}
+        folk = by[dmcommon.fnv1a32("tw_folk")]
+        beast = by[dmcommon.fnv1a32("tw_beast")]
+        self.assertEqual(self.core["name"](folk[1]), "Folk")
+        self.assertEqual(folk[2:4], (5, 19))                       # long blade, sneak bonuses
+        self.assertEqual(folk[9:11], (10, 5))
+        self.assertEqual(folk[16:32:2], (40,) * 8)                 # male attributes
+        self.assertEqual(folk[36] & 3, 1)                          # playable
+        self.assertEqual(beast[36] & 3, 3)                         # playable + beast
+        self.assertEqual(R.read_text(self.pack, self.core, folk[37]), "The Folk of the test shore.")
+        powers = self.obj("tw_folk")
+        spells = self.core["lists"][powers[16]:powers[16] + powers[14]]
+        self.assertEqual([h for h, _ in spells], [dmcommon.fnv1a32("tw_power")])
+
+    def test_birthsign_and_classes(self):
+        sign = self.obj("tw_sign_blade")
+        self.assertEqual(sign[2], R.OT["BSGN"])
+        spells = [h for h, _ in self.core["lists"][sign[16]:sign[16] + sign[14]]]
+        self.assertIn(dmcommon.fnv1a32("tw_ability_attack"), spells)
+        self.assertTrue(self.obj("tw_warrior")[5] & R.OF_PLAYABLE)
+        self.assertFalse(self.obj("tw_elder")[5] & R.OF_PLAYABLE)   # NPC-only class
+
+    def test_travel_destinations(self):
+        elder = self.obj("tw_villager")
+        first, count = elder[18], elder[19]
+        self.assertEqual(count, 1)
+        x, y, z, _rz, cell = self.core["travel"][first]
+        self.assertEqual(cell, dmcommon.fnv1a32("test hamlet, cellar"))
+        self.assertEqual((round(x), round(y), round(z)), (0, -300, 0))
+        self.assertEqual(self.obj("tw_villager_f")[19], 0)
+
+    def test_markers(self):
+        divine = [m for m in self.core["markers"] if m[5] == 0]
+        self.assertEqual(len(divine), 1)
+        self.assertEqual(divine[0][4], 0)                          # exterior
+
+    def test_npc_autocalc(self):
+        elder = self.obj("tw_villager")
+        actor = self.core["actors"][elder[17]]
+        self.assertEqual(actor[1], 52)                             # autocalculated health
+        self.assertEqual(actor[-1] & 0x3C803, 0x3C803)             # AIDT services kept
+        self.assertEqual(actor[4], 300)                            # barter gold
 
 
 class LoadOrderTests(unittest.TestCase):

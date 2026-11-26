@@ -31,8 +31,10 @@
 #define VM_MAX_MESSAGES 8
 #define VM_MAX_BUTTONS 8
 #define VM_MAX_JOURNAL 1024
-#define VM_PROP_SLOTS 4096  /* power of two */
-#define VM_ITEM_SLOTS 4096  /* power of two */
+#define VM_PROP_SLOTS 16384 /* power of two */
+#define VM_ITEM_SLOTS 8192  /* power of two */
+#define VM_SPELL_SALT 0x5bd1e995u /* spell lists live in the item store under key ^ salt */
+#define VM_FULL 0xFFFFu           /* VmItem.health: pristine */
 #define VM_MAX_CHOICES 24
 #define VM_MAX_NOTIFY 4
 #define VM_OP_BUDGET 200000 /* per script run: guards against endless while loops */
@@ -58,7 +60,8 @@ enum {
     VMI_GLOBAL = 1 << 0,    /* global script (keyed by script hash) */
     VMI_RUNNING = 1 << 1,   /* global script currently started */
     VMI_LOADED = 1 << 2,    /* local script whose reference is in the loaded zone */
-    VMI_TARGETED = 1 << 3   /* global script running on target (StartScript ref) */
+    VMI_TARGETED = 1 << 3,  /* global script running on target (StartScript ref) */
+    VMI_INVENTORY = 1 << 4  /* script of an item the player carries (runs every frame) */
 };
 
 /* one-frame events a local script can poll (OnActivate, OnDeath, ...) */
@@ -109,11 +112,20 @@ typedef struct {
     float value;
 } VmProp;
 
+/* Inventory stack. Stacks of one item differ by state (variant 0 is the
+ * pristine stack); slots never move, so a slot index identifies a stack. */
 typedef struct {
     uint32_t owner;
     uint32_t item;
     int32_t count;
+    uint16_t variant;
+    uint16_t health;   /* condition or uses left; VM_FULL = as cooked */
+    float charge;      /* enchantment charge; < 0 = full */
+    uint32_t soul;     /* soul gems: creature id hash, 0 = empty */
 } VmItem;
+
+/* notifications for the mechanics layer (rpg.c) */
+enum { VMN_SPELLS = 1, VMN_ITEMS = 2, VMN_KILLED = 3 };
 
 struct Vm;
 
@@ -149,6 +161,9 @@ typedef struct Vm {
     VmHost host;
     uint32_t player_hash;
     char pc_name[32];
+    /* character creation overrides of the player record (0 / -1 = record) */
+    uint32_t pc_race, pc_class;
+    int pc_female;
 
     VmValue *globals;
     uint32_t global_count;
@@ -196,6 +211,12 @@ typedef struct Vm {
 
     char notify[VM_MAX_NOTIFY][96];
     uint32_t notify_count;
+
+    /* mechanics hooks (rpg.c): modified stats, maxima, change notices */
+    void *mech;
+    float (*stat_get)(void *mech, const VmRef *ref, int prop, float raw);
+    float (*stat_max)(void *mech, const VmRef *ref, int dyn_prop);
+    void (*notify_change)(void *mech, int what, const VmRef *ref, uint32_t id);
 
     /* diagnostics */
     uint32_t errors, unhandled, runs;
@@ -248,10 +269,19 @@ float vm_prop_key(Vm *vm, uint32_t key, uint32_t object, int prop);
 void vm_set_prop_key(Vm *vm, uint32_t key, int prop, float v);
 int vm_disabled(Vm *vm, uint32_t key);
 int vm_disposition(Vm *vm, const VmRef *ref);
+/* stat as scripts and dialogue see it (modified by effects when rpg.c is attached) */
+float vm_stat(Vm *vm, const VmRef *ref, int prop);
 
 /* inventories */
-int32_t vm_item_count(Vm *vm, uint32_t owner, uint32_t item);
+int32_t vm_item_count(Vm *vm, uint32_t owner, uint32_t item);   /* all stacks */
+/* Adds to the pristine stack (delta > 0) or removes, pristine stack first. */
 void vm_item_add(Vm *vm, uint32_t owner, uint32_t item, int32_t delta);
+/* Adds/removes units of the stack with exactly this state; returns its slot or -1. */
+int vm_item_add_state(Vm *vm, uint32_t owner, uint32_t item, int32_t delta, uint16_t health,
+                      float charge, uint32_t soul);
+VmItem *vm_item_at(Vm *vm, int slot);
+/* Makes sure the record inventory/spells of a reference are in the stores. */
+void vm_seed(Vm *vm, const VmRef *ref);
 /* Iterates an owner's items: returns the next slot index >= *cursor with a
  * positive count, or -1. */
 int vm_item_next(Vm *vm, uint32_t owner, uint32_t *cursor, uint32_t *item, int32_t *count);
@@ -287,6 +317,19 @@ void vm_fix_defines(Vm *vm, char sigil, const char *in, char *out, uint32_t cap,
 /* game time helpers */
 void vm_date_string(const Vm *vm, uint16_t day, uint8_t month, char *out, uint32_t cap);
 const char *vm_month_name(const Vm *vm, int month);
+
+/* player race / class / sex (character creation overrides the record) */
+uint32_t vm_pc_race(const Vm *vm);
+uint32_t vm_pc_class(const Vm *vm);
+int vm_pc_female(const Vm *vm);
+/* deterministic game RNG */
+uint32_t vm_random(Vm *vm);
+float vm_random01(Vm *vm);
+/* sets a declared local of an object's script instance (created lazily);
+ * returns 0 when the object has no script or no such variable */
+int vm_set_local(Vm *vm, uint32_t object, const char *name, float value);
+/* advances game time by hours (rest, travel, training) */
+void vm_advance_hours(Vm *vm, float hours);
 
 /* reports a script error (counted, last message kept) */
 void vm_error(Vm *vm, const char *msg);

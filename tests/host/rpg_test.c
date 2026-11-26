@@ -273,11 +273,12 @@ static void test_quest(void)
     CHECK(dlg_start(d, &weaver, "Hamlet Weaver") == 1, "weaver greets again");
     CHECK(strcmp(last_text(d), "Hello again, Outlander. The Weaver of the Weavers' Circle greets you.") == 0,
           "%%Class / %%Faction defines ('%s')", last_text(d));
+    int32_t gold0 = vm_item_count(&g_vm, g_vm.player_hash, pw_hash_name("gold_001"));
     dlg_ask(d, (uint32_t)lost);
     CHECK(strcmp(last_text(d), "You found it! Here, take this gold.") == 0, "reward response ('%s')",
           last_text(d));
     CHECK(vm_item_count(&g_vm, g_vm.player_hash, pw_hash_name("tw_ring")) == 0, "ring handed over");
-    CHECK(vm_item_count(&g_vm, g_vm.player_hash, pw_hash_name("gold_001")) == 50, "50 gold received");
+    CHECK(vm_item_count(&g_vm, g_vm.player_hash, pw_hash_name("gold_001")) == gold0 + 50, "50 gold received");
     CHECK(vm_journal_index(&g_vm, pw_hash_name("tw_lostring")) == 100 && g_vm.journal_count == 3,
           "journal finished (%u entries)", (unsigned)g_vm.journal_count);
     {

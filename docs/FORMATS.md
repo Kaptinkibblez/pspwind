@@ -125,7 +125,7 @@ with the `x`-prefixed `.kf`; race skin parts are chosen by race and sex
 record. Creatures use the `x`-prefixed variant of their model and `.kf`
 when present.
 
-## DRPG — RPG database (`rpg.dpak`)
+## DRPG — RPG database (`rpg.dpak`, version 2)
 
 | Entry | Contents |
 |---|---|
@@ -154,7 +154,21 @@ aligned) followed by:
 | infos | `DRpgInfo` per topic in merged load order: text/script blob ids, voice hash, condition range, quest flags, disposition or journal index |
 | conds | `DRpgCond {func, comp, is_float, key, value}` — header filters (100–109) first, then SCVR functions (0–73) and variable kinds (74–84) |
 | blocks | `{pak entry hash, inflated size, packed size}` |
+| skills | `DRpgSkill[27]` in skill index order: name (GMST `sSkill…`), governing attribute, specialisation, the four use gains (SKIL record, else Morrowind's values), description blob |
+| mgefs | `DRpgMgef[143]` in effect index order: name (GMST `sEffect…`), flags (record flags merged with the engine's hard-coded ones: target skill/attribute, no duration/magnitude, harmful, spellmaking, enchanting, applied once…), base cost, speed, school, `present`, resisted-by / weakened-by effect |
+| races | `DRpgRace` sorted by hash: 7 skill bonuses, male/female attributes, heights/weights, playable/beast flags, description blob; powers are the RACE object's `list2` |
+| travel | `DRpgTravel {pos[3], rot_z, cell hash}`; an NPC's range is `stat[1]` (first) and `stat[2]` (count) |
+| markers | `DRpgMarker {pos[3], rot_z, cell hash, kind}`: kind 0 Divine Intervention (`divinemarker`), 1 Almsivi (`templemarker`); exteriors have cell 0 |
 | names | NUL-terminated name pool (offset 0 = "") |
+
+Version 2 additions elsewhere: `DRPG_OT_BSGN` objects (birthsigns: `link[1]`
+description blob, `list2` spells, `icon` texture); CLAS `stat[4]` services
+are OR'd into the NPC's actor services; NPCs with the autocalc flag (12-byte
+NPDT) get level-scaled attributes, skills and health/magicka/fatigue
+computed by the cooker with Morrowind's autocalc rules, so the runtime never
+recalculates record stats (their spell lists stay as authored; autocalculated
+spell selection is done for the player at character creation). `rpgdb_open` rejects a core without
+the 27 skill and 143 effect rows.
 
 Dialogue result scripts are `DRpgSnippet {flags, code_size, strings_size}`
 + code + strings inside a text block.

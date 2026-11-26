@@ -10,7 +10,9 @@
  *   analog stick  walk / strafe            triangle / cross  look up / down
  *   square / circle  turn left / right     R  activate (doors, objects)
  *   L  jump        D-pad up  run/walk      D-pad down  sneak
- *   D-pad left/right  cycle the animation of the nearest actor (debug)
+ *   D-pad left  ready / sheathe weapon     D-pad right  ready / put away magic
+ *   R with a weapon ready: hold to wind up, release to strike (bows shoot,
+ *   a readied lockpick picks the targeted lock); with magic ready: cast
  *   SELECT  journal menu (ui.c)            START  pause menu (fly mode, options)
  * Scheme B swaps the roles: analog looks, face buttons walk.
  */
@@ -20,6 +22,7 @@
 #include "actor.h"
 #include "common.h"
 #include "dialogue.h"
+#include "rpg.h"
 #include "rpgdb.h"
 #include "vm.h"
 #include "gfx.h"
@@ -66,10 +69,18 @@ typedef struct {
     RpgDb db;
     Vm vm;
     Dialogue dlg;
+    Rpg rpg;
 } GameRpg;
 
 /* requests for the UI layer */
-enum { GAME_UI_NONE = 0, GAME_UI_DIALOGUE, GAME_UI_BOOK };
+enum { GAME_UI_NONE = 0, GAME_UI_DIALOGUE, GAME_UI_BOOK, GAME_UI_LOOT, GAME_UI_CHARGEN, GAME_UI_REST,
+       GAME_UI_DEATH };
+/* character creation steps requested by scripts (EnableNameMenu ...) */
+enum { GAME_CG_NAME = 1, GAME_CG_RACE = 2, GAME_CG_CLASS = 4, GAME_CG_BIRTH = 8, GAME_CG_REVIEW = 16,
+       GAME_CG_ALL = 31 };
+/* menus the player may open (scripts enable them during character creation) */
+enum { GAME_MENU_STATS = 1, GAME_MENU_INVENTORY = 2, GAME_MENU_MAGIC = 4, GAME_MENU_MAP = 8,
+       GAME_MENU_REST = 16, GAME_MENU_ALL = 31 };
 
 typedef struct {
     World *world;
@@ -98,7 +109,21 @@ typedef struct {
     int ui_event;           /* GAME_UI_* for the UI layer */
     uint32_t ui_object;     /* book object hash for GAME_UI_BOOK */
     uint32_t ui_instance;   /* its instance */
+    VmRef ui_owner;         /* container / corpse for GAME_UI_LOOT */
+    uint32_t ui_chargen;    /* GAME_CG_* steps requested */
     InputState frozen_input;
+    /* combat and character state */
+    uint32_t menus_enabled; /* GAME_MENU_* */
+    float attack_charge;    /* seconds R has been held with a weapon ready */
+    int attack_holding;
+    float cast_cooldown;
+    int player_dead;
+    float fall_top;
+    int was_airborne;
+    uint32_t enemy_key;     /* last actor hit (HUD health bar) */
+    float enemy_time;
+    float *actor_timer;     /* per actor: seconds to its next attack */
+    int encumbered_notice;
 } Game;
 
 #define GAME_NO_TARGET 0xFFFFFFFFu
@@ -126,5 +151,10 @@ void game_camera(const Game *g, Camera *cam);
 const char *game_target_label(const Game *g);
 void game_message(Game *g, const char *text);
 void game_set_flying(Game *g, int on);
+/* debug: plays the next animation group on the nearest actor */
+void game_debug_cycle_animation(Game *g, int dir);
+/* new game after character creation or death */
+void game_respawn(Game *g);
+VmRef game_actor_ref(const Game *g, uint32_t actor);
 
 #endif /* PSPWIND_GAME_H */

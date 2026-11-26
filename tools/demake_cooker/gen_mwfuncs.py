@@ -6,12 +6,14 @@
 """
 
 import argparse
+import re
 import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+import mwdata  # noqa: E402
 import mwsig  # noqa: E402
 
 HEADER = os.path.join(HERE, "..", "..", "src", "mwfuncs.h")
@@ -37,6 +39,13 @@ PROPS = ([("ATTR_" + a.upper(), None) for a in ATTRIBUTES] + [("DYN_" + d.upper(
          + [("EFFECT_" + e.upper(), None) for e in EFFECTS] + [("AI_" + a.upper(), None) for a in AI]
          + [(n, None) for n in ("DISPOSITION", "REPUTATION", "LEVEL", "CRIME", "RANK", "DEATHS",
                                "DISABLED", "SEEDED", "TALKED", "ATTACKED")])
+# appended in Milestone 5 (ids above stay stable)
+PROPS += ([("ATTRDMG_" + a.upper(), None) for a in ATTRIBUTES]
+          + [("SKILLDMG_" + k.upper(), None) for k in SKILLS]
+          + [("SKILLPROG_" + k.upper(), None) for k in SKILLS]
+          + [("LVLATTR_" + a.upper(), None) for a in ATTRIBUTES]
+          + [(n, None) for n in ("LEVELPROG", "DEAD", "LOCK", "GOLDPOOL", "HOSTILE", "DISPTEMP",
+                                "CHARM_TARGET", "RESTOCK_DAY", "KILLS", "BOOKREAD")])
 PROP_ID = {name: i for i, (name, _) in enumerate(PROPS)}
 
 FAMILIES = ["NONE", "GET", "SET", "MOD", "SETDYN", "MODDYN", "RATIO", "GET_PC", "SET_PC", "MOD_PC"]
@@ -119,6 +128,17 @@ def render() -> str:
     lines += ["};", "#else", "extern const MwFuncInfo mw_funcs[MWF_COUNT];",
               "extern const uint8_t mw_func_fam[MWF_COUNT];",
               "extern const uint8_t mw_func_prop[MWF_COUNT];", "#endif", "",
+              "", "/* magic effect indices (MGEF INDX) */", "enum {"]
+    for i, (ident, _g, _f) in enumerate(mwdata.EFFECTS):
+        lines.append(f"    MGEF_{re.sub(r'(?<!^)(?=[A-Z])', '_', ident).upper()} = {i},")
+    lines += [f"    MGEF_COUNT = {len(mwdata.EFFECTS)}", "};", "",
+              "/* skill indices */", "enum {"]
+    for i, k in enumerate(SKILLS):
+        lines.append(f"    SKILL_{k.upper()} = {i},")
+    lines += ["    SKILL_COUNT = 27", "};", "", "enum {"]
+    for i, a in enumerate(ATTRIBUTES):
+        lines.append(f"    ATTR_{a.upper()} = {i},")
+    lines += ["    ATTR_COUNT = 8", "};", "",
               "#endif /* PSPWIND_MWFUNCS_H */", ""]
     return "\n".join(lines)
 

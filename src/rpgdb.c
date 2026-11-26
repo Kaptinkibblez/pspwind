@@ -52,8 +52,15 @@ int rpgdb_validate(const uint8_t *base, uint32_t size)
         !table_ok(&h->topics, sizeof(DRpgTopic), size) ||
         !table_ok(&h->infos, sizeof(DRpgInfo), size) ||
         !table_ok(&h->conds, sizeof(DRpgCond), size) ||
-        !table_ok(&h->blocks, sizeof(DRpgBlock), size))
+        !table_ok(&h->blocks, sizeof(DRpgBlock), size) ||
+        !table_ok(&h->skills, sizeof(DRpgSkill), size) ||
+        !table_ok(&h->mgefs, sizeof(DRpgMgef), size) ||
+        !table_ok(&h->races, sizeof(DRpgRace), size) ||
+        !table_ok(&h->travel, sizeof(DRpgTravel), size) ||
+        !table_ok(&h->markers, sizeof(DRpgMarker), size))
         return 3;
+    if (h->skills.count != RPGDB_SKILLS || h->mgefs.count != RPGDB_EFFECTS)
+        return 25;
     if (h->names_size == 0 || (uint64_t)h->names_ofs + h->names_size > size ||
         base[h->names_ofs + h->names_size - 1] != '\0')
         return 4;
@@ -73,6 +80,12 @@ int rpgdb_validate(const uint8_t *base, uint32_t size)
             return 9;
         if ((uint64_t)o->list_first + o->list_count > h->lists.count && o->list_count)
             return 10;
+        if (o->type == DRPG_OT_NPC && o->stat[2] &&
+            ((uint32_t)o->stat[1] > h->travel.count || (uint32_t)o->stat[2] > h->travel.count - (uint32_t)o->stat[1]))
+            return 26;
+        if ((o->type == DRPG_OT_RACE || o->type == DRPG_OT_BSGN) && o->list2_count &&
+            (uint64_t)o->list2_first + o->list2_count > h->lists.count)
+            return 12;
         if (o->type == DRPG_OT_NPC || o->type == DRPG_OT_CREA) {
             if ((uint32_t)o->stat[0] >= h->actors.count)
                 return 11;
@@ -156,6 +169,11 @@ static int attach(RpgDb *db, const uint8_t *core, uint32_t size, char *err, uint
     db->infos = (const DRpgInfo *)(core + h->infos.ofs);
     db->conds = (const DRpgCond *)(core + h->conds.ofs);
     db->blocks = (const DRpgBlock *)(core + h->blocks.ofs);
+    db->skills = (const DRpgSkill *)(core + h->skills.ofs);
+    db->mgefs = (const DRpgMgef *)(core + h->mgefs.ofs);
+    db->races = (const DRpgRace *)(core + h->races.ofs);
+    db->travel = (const DRpgTravel *)(core + h->travel.ofs);
+    db->markers = (const DRpgMarker *)(core + h->markers.ofs);
     db->names = (const char *)(core + h->names_ofs);
     db->names_size = h->names_size;
     for (i = 0; i < h->blocks.count; ++i) {
@@ -403,6 +421,27 @@ int rpgdb_topic(const RpgDb *db, uint32_t hash)
     if (lo < db->hdr->topics.count && db->topics[db->topic_by_hash[lo]].hash == hash)
         return (int)db->topic_by_hash[lo];
     return -1;
+}
+
+static int race_index(const RpgDb *db, uint32_t hash)
+{
+    BSEARCH_HASH(db->races, db->hdr->races.count, hash);
+}
+
+const DRpgRace *rpgdb_race(const RpgDb *db, uint32_t hash)
+{
+    int i;
+    if (!db->hdr)
+        return NULL;
+    i = race_index(db, hash);
+    return i < 0 ? NULL : &db->races[i];
+}
+
+const DRpgMgef *rpgdb_mgef(const RpgDb *db, int effect)
+{
+    if (!db->hdr || effect < 0 || effect >= RPGDB_EFFECTS)
+        return NULL;
+    return &db->mgefs[effect];
 }
 
 const char *rpgdb_topic_name(const RpgDb *db, uint32_t topic)

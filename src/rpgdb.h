@@ -19,6 +19,8 @@
 
 #define RPGDB_TEXT_SLOTS 4
 #define RPGDB_SCRIPT_CACHE PW_KB(384)
+#define RPGDB_SKILLS 27
+#define RPGDB_EFFECTS 143
 
 typedef struct {
     int32_t block;      /* -1 = empty */
@@ -49,6 +51,11 @@ typedef struct {
     const DRpgInfo *infos;
     const DRpgCond *conds;
     const DRpgBlock *blocks;
+    const DRpgSkill *skills;     /* 27 entries (NULL in a pre-v2 core) */
+    const DRpgMgef *mgefs;       /* RPGDB_EFFECTS entries */
+    const DRpgRace *races;
+    const DRpgTravel *travel;
+    const DRpgMarker *markers;
     const char *names;
     uint32_t names_size;
     /* text cache */
@@ -84,6 +91,8 @@ float rpgdb_gmst_float(const RpgDb *db, const char *id, float fallback);
 int rpgdb_script(const RpgDb *db, uint32_t hash);       /* index or -1 */
 const DRpgVar *rpgdb_script_var(const RpgDb *db, uint32_t script, uint32_t var_hash);
 int rpgdb_topic(const RpgDb *db, uint32_t hash);        /* index or -1 */
+const DRpgRace *rpgdb_race(const RpgDb *db, uint32_t hash);
+const DRpgMgef *rpgdb_mgef(const RpgDb *db, int effect); /* NULL when out of range */
 const char *rpgdb_topic_name(const RpgDb *db, uint32_t topic);
 
 /* Blob access: returns a pointer valid until the next blob/text call (the
