@@ -4,7 +4,10 @@
     meshes  (mesh_demaker)  -> meshes.dpak + embedded textures in loose/
     anims   (anim_demaker)  -> anims.dpak
     world   (world_demaker) -> zones.dpak (needs meshes.dpak for merging)
-    rpg     (rpg_compiler)  -> rpg.dpak (dialogue, journal, scripts, items...)
+    rpg     (rpg_compiler)  -> rpg.dpak (dialogue, journal, scripts, items, AI,
+                               sound records, path grids...)
+    sounds  (sound_demaker) -> sounds.dpak (ADPCM effects), music.dpak (music,
+                               voices)
     textures(tex_demaker)   -> textures.dpak, limited to textures that the
                                meshes and zones reference (+ UI art, icons)
 
@@ -29,6 +32,7 @@ import dmcommon  # noqa: E402
 import anim_demaker  # noqa: E402
 import mesh_demaker  # noqa: E402
 import rpg_compiler  # noqa: E402
+import sound_demaker  # noqa: E402
 import tex_demaker  # noqa: E402
 import world_demaker  # noqa: E402
 from dmcommon import LOG  # noqa: E402
@@ -61,6 +65,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if rc:
         return rc
     rc = rpg_compiler.main(data_args + ["--out", args.out])
+    if rc:
+        return rc
+    rc = sound_demaker.main(data_args + ["--out", args.out] + common)
     if rc:
         return rc
     loose = os.path.join(args.out, "loose")

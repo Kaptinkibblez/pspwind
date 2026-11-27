@@ -68,6 +68,21 @@ def texture_key(path: str) -> str:
     return p
 
 
+def sound_key(path: str, folder: str = "sound") -> str:
+    """Sound file key: 'Fx\\FOOT\\walk.wav' -> 'sound/fx/foot/walk'; with
+    folder='music', 'Explore/mx_1.mp3' -> 'music/explore/mx_1'. Paths that
+    already start with Sound/ or Music/ keep that folder."""
+    p = normalize_path(path)
+    for pre in ("sound/", "music/"):
+        if p.startswith(pre):
+            folder, p = pre[:-1], p[len(pre):]
+            break
+    base, ext = os.path.splitext(p)
+    if ext in (".wav", ".mp3"):
+        p = base
+    return folder + "/" + p
+
+
 def mesh_key(path: str) -> str:
     """'Meshes\\x\\Ex_Hlaalu_B_01.NIF' -> 'x/ex_hlaalu_b_01'."""
     p = normalize_path(path)

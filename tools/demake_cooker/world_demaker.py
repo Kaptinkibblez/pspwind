@@ -388,6 +388,7 @@ class WorldBuilder:
             ins = dzone.ZInstance(mesh_index, kind, flags, None, ref.id,
                                   ((content & 0xFF) << 24) | (index & 0xFFFFFF),
                                   ref.pos, ref.rot, ref.scale, bound)
+            ins.owner = ref.owner or ref.owner_faction
             if obj.type == "DOOR" and (ref.door_dest is not None or ref.dest_cell):
                 dd = ref.door_dest or (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
                 ins.door = dzone.ZDoor(self.dest_zone(ref), tuple(dd[:3]), tuple(dd[3:]),

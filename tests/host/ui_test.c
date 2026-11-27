@@ -18,6 +18,7 @@
 
 #include "game.h"
 #include "mem.h"
+#include "save.h"
 #include "ui.h"
 
 static int g_fail, g_checks;
@@ -678,15 +679,55 @@ int main(int argc, char **argv)
             CHECK(vm_prop(vm, &pc, MWP_ATTR_STRENGTH) > str, "strength raised");
         }
 
-        /* death and respawn */
-        rpg_damage(r, &pc, 0, 10000.0f, NULL);
-        frames(2);
-        CHECK(g_ui.mode == UI_DEATH && g_game.player_dead, "death screen");
-        screenshot("33_death");
-        press(GB_CROSS);
-        frames(2);
-        CHECK(g_ui.mode == UI_NONE && !g_game.player_dead && rpg_dyn(r, &pc, 0) == rpg_dyn_max(r, &pc, 0),
-              "respawned with full health");
+        /* M6: save through the slot list, die, load the save from the death screen */
+        {
+            static char dir[400];
+            static float playtime = 600.0f;
+            float sx, sy;
+            int i;
+            snprintf(dir, sizeof(dir), "%s/uisaves", g_shots ? g_shots : ".");
+            for (i = 0; i < SAVE_SLOTS; ++i) {
+                char p[460];
+                snprintf(p, sizeof(p), "%s/slot%d.sav", dir, i);
+                remove(p);
+            }
+            ui_set_saves(&g_ui, dir, &playtime);
+            ui_open_saves(&g_ui, 1);
+            CHECK(g_ui.mode == UI_SAVELOAD && g_ui.save_mode && g_ui.sel == 1 && !g_ui.slots[1].used,
+                  "save list opens on slot 1");
+            press(GB_CROSS);
+            CHECK(g_ui.mode == UI_NONE && save_latest(dir) == 1, "saved from the menu");
+            ui_open_saves(&g_ui, 0);
+            CHECK(g_ui.slots[1].used && strcmp(g_ui.slots[1].hdr.name, "Ab") == 0, "slot shows the save");
+            screenshot("35_load");
+            press(GB_CIRCLE);
+            sx = g_game.body.pos.x;
+            sy = g_game.body.pos.y;
+            g_game.body.pos.x += 200.0f;
+            vm_item_add(vm, pc.key, pw_hash_name("gold_001"), 77);
+            rpg_damage(r, &pc, 0, 10000.0f, NULL);
+            frames(2);
+            CHECK(g_ui.mode == UI_DEATH && g_game.player_dead, "death screen");
+            screenshot("33_death");
+            press(GB_CROSS);
+            frames(2);
+            CHECK(g_ui.mode == UI_NONE && !g_game.player_dead && rpg_dyn(r, &pc, 0) > 0.0f &&
+                      fabsf(g_game.body.pos.x - sx) < 1.0f && fabsf(g_game.body.pos.y - sy) < 1.0f,
+                  "death screen loaded the save (mode %d dead %d hp %.0f pos %.0f,%.0f vs %.0f,%.0f '%s')", g_ui.mode,
+                  g_game.player_dead, rpg_dyn(r, &pc, 0), g_game.body.pos.x, g_game.body.pos.y, sx, sy, g_ui.status);
+            /* without saves: start again here */
+            for (i = 0; i < SAVE_SLOTS; ++i) {
+                char p[460];
+                snprintf(p, sizeof(p), "%s/slot%d.sav", dir, i);
+                remove(p);
+            }
+            rpg_damage(r, &pc, 0, 10000.0f, NULL);
+            frames(2);
+            press(GB_CROSS);
+            frames(2);
+            CHECK(g_ui.mode == UI_NONE && !g_game.player_dead && rpg_dyn(r, &pc, 0) == rpg_dyn_max(r, &pc, 0),
+                  "respawned with full health");
+        }
         frames(130);
         screenshot("34_hud");
         (void)find_door;

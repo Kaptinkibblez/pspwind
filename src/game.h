@@ -20,6 +20,8 @@
 #define PSPWIND_GAME_H
 
 #include "actor.h"
+#include "ai.h"
+#include "audio.h"
 #include "common.h"
 #include "dialogue.h"
 #include "rpg.h"
@@ -82,7 +84,7 @@ enum { GAME_CG_NAME = 1, GAME_CG_RACE = 2, GAME_CG_CLASS = 4, GAME_CG_BIRTH = 8,
 enum { GAME_MENU_STATS = 1, GAME_MENU_INVENTORY = 2, GAME_MENU_MAGIC = 4, GAME_MENU_MAP = 8,
        GAME_MENU_REST = 16, GAME_MENU_ALL = 31 };
 
-typedef struct {
+typedef struct Game {
     World *world;
     Zone zone;
     PhysWorld phys;
@@ -124,6 +126,15 @@ typedef struct {
     float enemy_time;
     float *actor_timer;     /* per actor: seconds to its next attack */
     int encumbered_notice;
+    /* Milestone 6: behaviour and sound */
+    AiState ai;
+    Audio *audio;           /* NULL without sounds.dpak / music.dpak */
+    float step_dist;        /* player footsteps */
+    int step_side;
+    float ambient_timer;    /* region ambient sounds */
+    float light_timer;      /* light loop selection */
+    uint32_t light_inst[4]; /* instances with a looping sound (+1, 0 = none) */
+    uint32_t light_voice[4];
 } Game;
 
 #define GAME_NO_TARGET 0xFFFFFFFFu
@@ -156,5 +167,14 @@ void game_debug_cycle_animation(Game *g, int dir);
 /* new game after character creation or death */
 void game_respawn(Game *g);
 VmRef game_actor_ref(const Game *g, uint32_t actor);
+/* actor index of a reference key, or -1 */
+int game_actor_index(const Game *g, uint32_t key);
+/* talk to (or loot) an actor instance; guards use it to confront criminals */
+void game_talk(Game *g, uint32_t inst);
+/* the player takes count of item from something owned by owner: marks the
+ * goods stolen and reports the theft when seen; returns 1 when witnessed */
+int game_theft(Game *g, uint32_t owner, uint32_t item, int32_t count);
+/* plays a SOUN id without position (UI, the player's own sounds) */
+void game_sound(Game *g, const char *id);
 
 #endif /* PSPWIND_GAME_H */

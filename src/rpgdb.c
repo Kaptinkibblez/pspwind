@@ -57,7 +57,10 @@ int rpgdb_validate(const uint8_t *base, uint32_t size)
         !table_ok(&h->mgefs, sizeof(DRpgMgef), size) ||
         !table_ok(&h->races, sizeof(DRpgRace), size) ||
         !table_ok(&h->travel, sizeof(DRpgTravel), size) ||
-        !table_ok(&h->markers, sizeof(DRpgMarker), size))
+        !table_ok(&h->markers, sizeof(DRpgMarker), size) ||
+        !table_ok(&h->aipkgs, sizeof(DRpgAiPackage), size) ||
+        !table_ok(&h->sounds, sizeof(DRpgSound), size) ||
+        !table_ok(&h->soundgens, sizeof(DRpgSoundGen), size))
         return 3;
     if (h->skills.count != RPGDB_SKILLS || h->mgefs.count != RPGDB_EFFECTS)
         return 25;
@@ -83,12 +86,15 @@ int rpgdb_validate(const uint8_t *base, uint32_t size)
         if (o->type == DRPG_OT_NPC && o->stat[2] &&
             ((uint32_t)o->stat[1] > h->travel.count || (uint32_t)o->stat[2] > h->travel.count - (uint32_t)o->stat[1]))
             return 26;
-        if ((o->type == DRPG_OT_RACE || o->type == DRPG_OT_BSGN) && o->list2_count &&
+        if ((o->type == DRPG_OT_RACE || o->type == DRPG_OT_BSGN || o->type == DRPG_OT_REGN) && o->list2_count &&
             (uint64_t)o->list2_first + o->list2_count > h->lists.count)
             return 12;
         if (o->type == DRPG_OT_NPC || o->type == DRPG_OT_CREA) {
             if ((uint32_t)o->stat[0] >= h->actors.count)
                 return 11;
+            if (o->stat[4] && ((uint32_t)o->stat[3] > h->aipkgs.count ||
+                               (uint32_t)o->stat[4] > h->aipkgs.count - (uint32_t)o->stat[3]))
+                return 27;
             if (o->list2_count && (uint64_t)o->list2_first + o->list2_count > h->lists.count)
                 return 12;
         } else if ((o->type == DRPG_OT_ALCH || o->type == DRPG_OT_INGR) && o->list2_count &&
@@ -174,6 +180,9 @@ static int attach(RpgDb *db, const uint8_t *core, uint32_t size, char *err, uint
     db->races = (const DRpgRace *)(core + h->races.ofs);
     db->travel = (const DRpgTravel *)(core + h->travel.ofs);
     db->markers = (const DRpgMarker *)(core + h->markers.ofs);
+    db->aipkgs = (const DRpgAiPackage *)(core + h->aipkgs.ofs);
+    db->sounds = (const DRpgSound *)(core + h->sounds.ofs);
+    db->soundgens = (const DRpgSoundGen *)(core + h->soundgens.ofs);
     db->names = (const char *)(core + h->names_ofs);
     db->names_size = h->names_size;
     for (i = 0; i < h->blocks.count; ++i) {
@@ -421,6 +430,45 @@ int rpgdb_topic(const RpgDb *db, uint32_t hash)
     if (lo < db->hdr->topics.count && db->topics[db->topic_by_hash[lo]].hash == hash)
         return (int)db->topic_by_hash[lo];
     return -1;
+}
+
+static int sound_index(const RpgDb *db, uint32_t hash)
+{
+    BSEARCH_HASH(db->sounds, db->hdr->sounds.count, hash);
+}
+
+const DRpgSound *rpgdb_sound(const RpgDb *db, uint32_t hash)
+{
+    int i;
+    if (!db->hdr || !hash)
+        return NULL;
+    i = sound_index(db, hash);
+    return i < 0 ? NULL : &db->sounds[i];
+}
+
+uint32_t rpgdb_soundgen(const RpgDb *db, uint32_t creature, int type)
+{
+    uint32_t lo = 0, hi, fallback = 0;
+    if (!db->hdr)
+        return 0;
+    hi = db->hdr->soundgens.count;
+    /* rows sorted by (creature, type): binary search the creature's run */
+    while (lo < hi) {
+        uint32_t mid = (lo + hi) >> 1;
+        const DRpgSoundGen *g = &db->soundgens[mid];
+        if (g->creature < creature || (g->creature == creature && g->type < type))
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    if (lo < db->hdr->soundgens.count && db->soundgens[lo].creature == creature &&
+        db->soundgens[lo].type == type)
+        return db->soundgens[lo].sound;
+    /* creature 0 rows are the defaults */
+    for (lo = 0; lo < db->hdr->soundgens.count && db->soundgens[lo].creature == 0; ++lo)
+        if (db->soundgens[lo].type == type)
+            fallback = db->soundgens[lo].sound;
+    return fallback;
 }
 
 static int race_index(const RpgDb *db, uint32_t hash)

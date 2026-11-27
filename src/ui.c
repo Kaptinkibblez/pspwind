@@ -1114,6 +1114,7 @@ void ui_open_book(Ui *ui, uint32_t object, uint32_t inst)
     ui_doc_add(&ui->doc, K_TEXT, text, NULL, 0);
     /* skill books teach on the first read, wherever they are read */
     rpg_read_book(&r->rpg, object);
+    game_sound(ui->g, "Book Open");
 }
 
 static void update_book(Ui *ui, const InputState *in)
@@ -1277,6 +1278,9 @@ void ui_update(Ui *ui, const InputState *in, float dt)
         ui->status_time -= dt;
     if (opened)
         in = &none;
+    if (ui_active(ui) && !opened && (in->pressed & (GB_UP | GB_DOWN | GB_LEFT | GB_RIGHT | GB_CROSS | GB_CIRCLE |
+                                                     GB_SQUARE | GB_TRIANGLE | GB_L | GB_R)))
+        game_sound(g, "Menu Click");
     m = modal(ui);
     if (m) {
         update_modal(ui, m, in);
@@ -1308,6 +1312,7 @@ void ui_update(Ui *ui, const InputState *in, float dt)
         case UI_LEVELUP:
         case UI_REST:
         case UI_DEATH:
+        case UI_SAVELOAD:
             ui_char_update(ui, in);
             break;
         default:
@@ -1350,6 +1355,7 @@ void ui_draw(Ui *ui, UiCanvas *c)
     case UI_LEVELUP:
     case UI_REST:
     case UI_DEATH:
+    case UI_SAVELOAD:
         ui_char_draw(ui, c);
         break;
     default:

@@ -112,7 +112,7 @@ class CookTests(unittest.TestCase):
         self.assertEqual(r["script_errors"], {})
         self.assertEqual(r["quests"], 1)
         self.assertEqual(r["dialogues"], 16)  # 7 topics + 9 Persuasion-type
-        self.assertEqual(r["infos"], 26)
+        self.assertEqual(r["infos"], 31)  # + the guard's greetings and crime answers
         self.assertEqual(r["result_script_failures"], 0)
         self.assertGreater(r["script_warnings"], 0)  # the deliberately broken script
 
@@ -293,6 +293,58 @@ class CookTests(unittest.TestCase):
         self.assertEqual(actor[1], 52)                             # autocalculated health
         self.assertEqual(actor[-1] & 0x3C803, 0x3C803)             # AIDT services kept
         self.assertEqual(actor[4], 300)                            # barter gold
+
+
+    # ------------------------------------------------ DRPG v3 tables
+    def test_ai_packages(self):
+        guard = self.obj("tw_guard")
+        first, count = guard[20], guard[21]
+        self.assertEqual(count, 1)
+        pkg = self.core["aipkgs"][first]
+        self.assertEqual(pkg[7], R.AI_WANDER)
+        self.assertEqual(pkg[5], 500)                               # wander distance
+        self.assertEqual(pkg[9:12], (40, 20, 10))                   # idle chances
+        snapper = self.obj("tw_snapper")
+        self.assertEqual(self.core["aipkgs"][snapper[20]][5], 300)
+        actor = self.core["actors"][snapper[17]]
+        self.assertEqual(actor[25], 100)                            # fight
+
+    def test_sounds(self):
+        sounds = {s[0]: s for s in self.core["sounds"]}
+        swish = sounds[dmcommon.fnv1a32("weapon swish")]
+        self.assertEqual(swish[1], dmcommon.fnv1a32("sound/fx/tw/swish"))
+        self.assertEqual(swish[2], 255)
+        waves = sounds[dmcommon.fnv1a32("tw waves")]
+        self.assertEqual(waves[3:5], (10, 40))
+        gens = self.core["soundgens"]
+        self.assertEqual([g[2] for g in gens], [0, 1, 4, 5, 6])
+        self.assertTrue(all(g[0] == dmcommon.fnv1a32("tw_critter") for g in gens))
+        frost = self.core["mgefs"][16]
+        self.assertEqual(frost[9:13], tuple(dmcommon.fnv1a32("destruction " + k)
+                                            for k in ("cast", "bolt", "hit", "area")))
+        door = self.obj("tw_door")
+        self.assertEqual(door[17] & 0xFFFFFFFF, dmcommon.fnv1a32("door wood open"))
+        lantern = self.obj("tw_lantern")
+        self.assertEqual(lantern[12], dmcommon.fnv1a32("fire"))
+        region = self.obj("tw region")
+        sounds_ = self.core["lists"][region[16]:region[16] + region[14]]
+        self.assertEqual(sounds_, [(dmcommon.fnv1a32("tw waves"), 30)])
+
+    def test_pathgrids(self):
+        import struct as st
+        for key, npts in (("pgrd/test hamlet, cellar", 9), ("pgrd/0,0", 11)):
+            data = self.pack.get(key)
+            magic, version, count, edges = st.unpack_from("<IHHI", data, 0)
+            self.assertEqual((magic, version, count), (R.PGRD_MAGIC, 1, npts))
+            firsts = st.unpack_from(f"<{count + 1}H", data, 12 + 12 * count)
+            self.assertEqual(firsts[-1], edges)
+        cellar = self.pack.get("pgrd/test hamlet, cellar")
+        firsts = st.unpack_from("<10H", cellar, 12 + 12 * 9)
+        self.assertEqual([firsts[i + 1] - firsts[i] for i in range(9)], [2, 3, 2, 3, 4, 3, 2, 3, 2])
+
+    def test_prison_marker(self):
+        kinds = sorted(m[5] for m in self.core["markers"])
+        self.assertEqual(kinds, [0, 2])
 
 
 class LoadOrderTests(unittest.TestCase):

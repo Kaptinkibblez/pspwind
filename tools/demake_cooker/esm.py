@@ -123,6 +123,7 @@ class CellRef:
     key: str = ""
     trap: str = ""
     owner: str = ""
+    owner_faction: str = ""
     count: int = 1
     deleted: bool = False
     persistent: bool = False
@@ -475,6 +476,8 @@ class World:
                 ref.trap = zstr(d)
             elif n == "ANAM":
                 ref.owner = zstr(d)
+            elif n == "CNAM":
+                ref.owner_faction = zstr(d)
             elif n == "NAM9" and len(d) >= 4:
                 ref.count = struct.unpack_from("<i", d, 0)[0]
             elif n == "DELE":

@@ -17,6 +17,7 @@
 #define JUMP_SPEED 360.0f
 #define BODY_RADIUS 28.0f
 #define BODY_HEIGHT 128.0f
+#define GAME_PLAYER_OBSTACLE 0xFFFFFFFEu
 #define SNEAK_HEIGHT 96.0f
 #define DOOR_SWING_SPEED 2.2f     /* radians/s */
 #define DOOR_OPEN_ANGLE 1.5708f
@@ -24,12 +25,14 @@
 #define ACTOR_FACE_DIST 300.0f
 #define KILL_Z -16384.0f
 
-static void actor_combat(Game *g, uint32_t i, float dt);
 static int door_lock(Game *g, uint32_t inst);
+static int actor_dead(const Game *g, uint32_t actor);
 static void rpg_teleport(void *user, uint32_t cell, const float pos[3], float rot_z);
 static void rpg_locate(void *user, uint32_t *cell, float pos[3], float *rot_z);
 static void rpg_killed(void *user, const VmRef *ref);
 static int rpg_hostiles(void *user, float radius);
+static int rpg_summon(void *user, const VmRef *caster, uint32_t creature, int effect, float duration);
+static void sound_at(Game *g, uint32_t sound, const float pos[3], uint32_t owner);
 
 void game_default_controls(Controls *c)
 {
@@ -85,6 +88,9 @@ void game_camera(const Game *g, Camera *cam)
 static uint32_t instance_key(const Game *g, uint32_t inst)
 {
     const DZoneInstance *in = &g->zone.instances[inst];
+    /* spawned references are never "the" unique object: their own key */
+    if ((in->refnum & 0xFF000000u) == ZONE_SPAWN_REFNUM)
+        return (g->zone_hash * 0x9E3779B1u) ^ (in->refnum * 0x85EBCA77u) ^ 0x27D4EB2Fu;
     return vm_reference_key(&g->rpg->vm, in->object_hash, g->zone_hash, in->refnum);
 }
 
@@ -94,7 +100,7 @@ VmRef game_instance_ref(const Game *g, uint32_t inst)
     memset(&r, 0, sizeof(r));
     r.vmi = -1;
     r.inst = -1;
-    if (!g->rpg || !g->zone.hdr || inst >= g->zone.hdr->instance_count)
+    if (!g->rpg || !g->zone.hdr || inst >= g->zone.instance_count)
         return r;
     r.kind = VM_REF_OBJECT;
     r.inst = (int32_t)inst;
@@ -107,12 +113,12 @@ VmRef game_instance_ref(const Game *g, uint32_t inst)
 static void bind_scripts(Game *g)
 {
     uint32_t i;
-    for (i = 0; i < g->zone.hdr->instance_count; ++i)
+    for (i = 0; i < g->zone.instance_count; ++i)
         g->inst_vmi[i] = -1;
     if (!g->rpg)
         return;
     vm_unload_zone(&g->rpg->vm);
-    for (i = 0; i < g->zone.hdr->instance_count; ++i) {
+    for (i = 0; i < g->zone.instance_count; ++i) {
         const DZoneInstance *in = &g->zone.instances[i];
         uint32_t key = instance_key(g, i);
         g->inst_vmi[i] = (int16_t)vm_bind_reference(&g->rpg->vm, key, in->object_hash, (int32_t)i);
@@ -124,7 +130,7 @@ static void bind_scripts(Game *g)
 const char *game_instance_name(const Game *g, uint32_t inst)
 {
     const DRpgObject *o;
-    if (!g->rpg || !g->zone.hdr || inst >= g->zone.hdr->instance_count)
+    if (!g->rpg || !g->zone.hdr || inst >= g->zone.instance_count)
         return "";
     o = rpgdb_object(&g->rpg->db, g->zone.instances[inst].object_hash);
     return o ? rpgdb_name(&g->rpg->db, o->name) : "";
@@ -173,7 +179,7 @@ int game_enter_zone(Game *g, uint32_t zone, const float *pos, const float *rot, 
         snprintf(err, errlen, "out of zone memory for collision");
         return -1;
     }
-    for (i = 0; i < g->zone.hdr->instance_count; ++i)
+    for (i = 0; i < g->zone.instance_count; ++i)
         if (g->zone.instances[i].kind == DZONE_INST_DOOR &&
             g->zone.instances[i].door == DZONE_NONE)
             n++;
@@ -183,7 +189,7 @@ int game_enter_zone(Game *g, uint32_t zone, const float *pos, const float *rot, 
         return -1;
     }
     g->door_count = 0;
-    for (i = 0; i < g->zone.hdr->instance_count; ++i) {
+    for (i = 0; i < g->zone.instance_count; ++i) {
         if (g->zone.instances[i].kind == DZONE_INST_DOOR &&
             g->zone.instances[i].door == DZONE_NONE) {
             SwingDoor *d = &g->doors[g->door_count++];
@@ -194,13 +200,13 @@ int game_enter_zone(Game *g, uint32_t zone, const float *pos, const float *rot, 
 
     g->zone_hash = g->world->zone_list[zone].entry_hash;
     g->inst_vmi = (int16_t *)mem_try_alloc(MEM_REGION_ZONE,
-                                           (g->zone.hdr->instance_count + 1u) * sizeof(int16_t), 4);
+                                           (g->zone.instance_count + ZONE_SPAWN_SLOTS + 1u) * sizeof(int16_t), 4);
     if (!g->inst_vmi) {
         snprintf(err, errlen, "out of zone memory for script bindings");
         return -1;
     }
     bind_scripts(g);
-    g->actor_timer = (float *)mem_try_alloc(MEM_REGION_ZONE, (g->actors.count + 1u) * sizeof(float), 4);
+    g->actor_timer = (float *)mem_try_alloc(MEM_REGION_ZONE, (g->actors.capacity + 1u) * sizeof(float), 4);
     if (!g->actor_timer) {
         snprintf(err, errlen, "out of zone memory for combat timers");
         return -1;
@@ -238,6 +244,15 @@ int game_enter_zone(Game *g, uint32_t zone, const float *pos, const float *rot, 
     g->target = GAME_NO_TARGET;
     g->request.pending = 0;
     g->zone_loads++;
+    g->body.ignore_obstacle = GAME_PLAYER_OBSTACLE;
+    ai_zone_init(g);
+    if (g->audio) {
+        uint32_t k;
+        audio_stop(g->audio, 0, 0); /* effects and loops of the old zone; music and speech carry on */
+        for (k = 0; k < 4; ++k)
+            g->light_inst[k] = g->light_voice[k] = 0;
+        g->light_timer = 0.0f;
+    }
     return 0;
 }
 
@@ -277,7 +292,7 @@ static uint32_t find_target(Game *g)
     uint32_t i, best = GAME_NO_TARGET, wall_inst;
     float best_t = GAME_ACTIVATE_DIST, wall_t;
     view_ray(g, &o, &d);
-    for (i = 0; i < z->hdr->instance_count; ++i) {
+    for (i = 0; i < z->instance_count; ++i) {
         const DZoneInstance *in = &z->instances[i];
         Vec4 c;
         float t, r;
@@ -335,14 +350,18 @@ void game_take(Game *g, uint32_t inst)
 {
     char buf[96];
     const char *name = game_instance_name(g, inst);
-    if (!g->rpg || inst >= g->zone.hdr->instance_count || g->zone.inst_hidden[inst])
+    if (!g->rpg || inst >= g->zone.instance_count || g->zone.inst_hidden[inst])
         return;
     {
         VmRef ref = game_instance_ref(g, inst);
         Vm *vm = &g->rpg->vm;
+        uint32_t owner = g->zone.instances[inst].owner;
         vm_item_add(vm, vm->player_hash, ref.object, 1);
         vm_set_prop_key(vm, ref.key, MWP_DISABLED, 1.0f);
         g->zone.inst_hidden[inst] = 1;
+        game_sound(g, ref.object == pw_hash_name(RPG_GOLD) ? "Item Gold Up" : "Item Misc Up");
+        if (owner)
+            game_theft(g, owner, ref.object, 1);
     }
     snprintf(buf, sizeof(buf), "Taken: %s", *name ? name : "item");
     game_message(g, buf);
@@ -358,7 +377,7 @@ static void open_loot(Game *g, uint32_t inst)
     g->ui_event = GAME_UI_LOOT;
 }
 
-static void start_dialogue(Game *g, uint32_t inst)
+void game_talk(Game *g, uint32_t inst)
 {
     VmRef ref = game_instance_ref(g, inst);
     if (rpg_is_dead(&g->rpg->rpg, &ref)) {
@@ -394,11 +413,16 @@ static void default_activate(Game *g, uint32_t inst)
             g->request.has_pos = 1;
             memcpy(g->request.pos, d->dest_pos, sizeof(g->request.pos));
             memcpy(g->request.rot, d->dest_rot, sizeof(g->request.rot));
+            if (o)
+                sound_at(g, (uint32_t)o->stat[0], in->pos, 0);
             return;
         }
         for (i = 0; i < g->door_count; ++i) {
             if (g->doors[i].instance == inst) {
-                g->doors[i].target = g->doors[i].target > 0.0f ? 0.0f : DOOR_OPEN_ANGLE;
+                int opening = !(g->doors[i].target > 0.0f);
+                g->doors[i].target = opening ? DOOR_OPEN_ANGLE : 0.0f;
+                if (o)
+                    sound_at(g, (uint32_t)o->stat[opening ? 0 : 1], in->pos, 0);
                 return;
             }
         }
@@ -408,7 +432,7 @@ static void default_activate(Game *g, uint32_t inst)
     case DZONE_INST_NPC:
     case DZONE_INST_CREATURE:
         if (g->rpg)
-            start_dialogue(g, inst);
+            game_talk(g, inst);
         else
             game_message(g, "Dialogue needs rpg.dpak (run rpg_compiler).");
         break;
@@ -464,7 +488,7 @@ static int ref_position(const Game *g, const VmRef *r, float out[3], float *zrot
         *zrot = g->yaw;
         return 1;
     }
-    if (r->kind == VM_REF_OBJECT && r->inst >= 0 && (uint32_t)r->inst < g->zone.hdr->instance_count) {
+    if (r->kind == VM_REF_OBJECT && r->inst >= 0 && (uint32_t)r->inst < g->zone.instance_count) {
         int a = find_actor(g, (uint32_t)r->inst);
         if (a >= 0) {
             out[0] = g->actors.list[a].pos.x;
@@ -494,7 +518,7 @@ static int set_ref_position(Game *g, const VmRef *r, const float p[3], float zro
             g->yaw = pw_wrap_angle(zrot);
         return 1;
     }
-    if (r->kind == VM_REF_OBJECT && r->inst >= 0 && (uint32_t)r->inst < g->zone.hdr->instance_count) {
+    if (r->kind == VM_REF_OBJECT && r->inst >= 0 && (uint32_t)r->inst < g->zone.instance_count) {
         int a = find_actor(g, (uint32_t)r->inst);
         if (a >= 0) {
             Vec4 pos = vec4(p[0], p[1], p[2], 1.0f);
@@ -517,6 +541,212 @@ static int axis_of(const VmCtx *ctx, VmValue v)
     const char *s = vm_arg_string(ctx, v);
     int c = s[0] | 0x20;
     return c == 'x' ? 0 : c == 'y' ? 1 : c == 'z' ? 2 : -1;
+}
+
+/* ---- Milestone 6 verbs: AI packages, combat, crime, spawning, sound */
+static int ref_actor(const Game *g, const VmRef *ref)
+{
+    return ref->kind == VM_REF_OBJECT && ref->inst >= 0 ? find_actor(g, (uint32_t)ref->inst) : -1;
+}
+
+/* "Fx\\foo.wav" -> pw_hash_name("sound/fx/foo"), Music folder likewise */
+static uint32_t sound_file_hash(const char *path, const char *folder)
+{
+    char buf[160];
+    size_t n = 0, k;
+    const char *p = path;
+    if (!path || !*path)
+        return 0;
+    while (*p == '\\' || *p == '/')
+        ++p;
+    if (strncmp(p, "sound", 5) != 0 && strncmp(p, "Sound", 5) != 0 && strncmp(p, "music", 5) != 0 &&
+        strncmp(p, "Music", 5) != 0) {
+        n = (size_t)snprintf(buf, sizeof(buf), "%s/", folder);
+    }
+    for (k = 0; p[k] && n + 1 < sizeof(buf); ++k)
+        buf[n++] = p[k] == '\\' ? '/' : p[k];
+    buf[n] = '\0';
+    {
+        char *dot = strrchr(buf, '.'), *slash = strrchr(buf, '/');
+        if (dot && (!slash || dot > slash))
+            *dot = '\0';
+    }
+    return pw_hash_name(buf);
+}
+
+static int target_of_arg(Game *g, const char *id)
+{
+    uint32_t h = pw_hash_name(id), i;
+    if (h == pw_hash_name("player"))
+        return AI_TARGET_PLAYER;
+    for (i = 0; i < g->actors.count; ++i)
+        if (g->zone.instances[g->actors.list[i].instance].object_hash == h && !actor_dead(g, i))
+            return (int)i;
+    return AI_TARGET_NONE;
+}
+
+static int host_call_m6(Game *g, uint16_t func, const VmRef *ref, const VmCtx *ctx, const VmValue *args, int argc,
+                        VmValue *ret)
+{
+    int a = ref_actor(g, ref);
+    switch (func) {
+    case MWF_AIWANDER:
+    case MWF_AITRAVEL:
+    case MWF_AIFOLLOW:
+    case MWF_AIFOLLOWCELL:
+    case MWF_AIESCORT:
+    case MWF_AIESCORTCELL:
+    case MWF_AIACTIVATE: {
+        DRpgAiPackage p;
+        int k, o = (func == MWF_AIFOLLOWCELL || func == MWF_AIESCORTCELL) ? 1 : 0;
+        if (a < 0)
+            return 1;
+        memset(&p, 0, sizeof(p));
+        if (func == MWF_AIWANDER) {
+            p.type = DRPG_AI_WANDER;
+            p.distance = (uint16_t)PW_CLAMP(args[0].f, 0.0f, 65535.0f);
+            p.duration = (uint16_t)PW_CLAMP(args[1].f, 0.0f, 65535.0f);
+            p.hour = (uint8_t)PW_CLAMP(args[2].f, 0.0f, 24.0f);
+            for (k = 0; k < 8 && 3 + k < argc; ++k)
+                p.idle[k] = (uint8_t)PW_CLAMP(args[3 + k].i, 0, 100);
+        } else if (func == MWF_AITRAVEL) {
+            p.type = DRPG_AI_TRAVEL;
+            for (k = 0; k < 3; ++k)
+                p.pos[k] = args[k].f;
+        } else if (func == MWF_AIACTIVATE) {
+            p.type = DRPG_AI_ACTIVATE;
+            p.target = pw_hash_name(vm_arg_string(ctx, args[0]));
+        } else {
+            p.type = (func == MWF_AIFOLLOW || func == MWF_AIFOLLOWCELL) ? DRPG_AI_FOLLOW : DRPG_AI_ESCORT;
+            p.target = pw_hash_name(vm_arg_string(ctx, args[0]));
+            if (o)
+                p.cell = pw_hash_name(vm_arg_string(ctx, args[1]));
+            p.duration = (uint16_t)PW_CLAMP(args[1 + o].f, 0.0f, 65535.0f);
+            for (k = 0; k < 3; ++k)
+                p.pos[k] = args[2 + o + k].f;
+        }
+        ai_set_package(g, a, &p);
+        return 1;
+    }
+    case MWF_GETAIPACKAGEDONE:
+        ret->i = a >= 0 ? ai_package_done(g, a) : 0;
+        return 1;
+    case MWF_GETCURRENTAIPACKAGE:
+        ret->i = a >= 0 ? ai_current_package(g, a) : -1;
+        return 1;
+    case MWF_STARTCOMBAT: {
+        int t = target_of_arg(g, vm_arg_string(ctx, args[0]));
+        if (a >= 0 && t != AI_TARGET_NONE)
+            ai_start_combat(g, a, t);
+        return 1;
+    }
+    case MWF_STOPCOMBAT:
+        if (a >= 0)
+            ai_stop_combat(g, a);
+        return 1;
+    case MWF_GETATTACKED:
+        ret->i = a >= 0 && g->ai.actors && g->ai.actors[a].state == AI_COMBAT;
+        return 1;
+    case MWF_GETTARGET: {
+        int t = target_of_arg(g, vm_arg_string(ctx, args[0]));
+        ret->i = a >= 0 && g->ai.actors && g->ai.actors[a].state == AI_COMBAT && g->ai.actors[a].target == t;
+        return 1;
+    }
+    case MWF_GETDETECTED:
+    case MWF_GETLOS:
+        if (a >= 0 && target_of_arg(g, vm_arg_string(ctx, args[0])) == AI_TARGET_PLAYER)
+            ret->i = func == MWF_GETLOS ? ai_has_los(g, a) : ai_detects_player(g, a);
+        else
+            ret->i = 0;
+        return 1;
+    case MWF_PAYFINE:
+    case MWF_PAYFINETHIEF:
+        ai_pay_fine(g, func == MWF_PAYFINETHIEF);
+        return 1;
+    case MWF_GOTOJAIL:
+        ai_go_to_jail(g);
+        return 1;
+    case MWF_PLACEATPC:
+    case MWF_PLACEATME: {
+        uint32_t obj = pw_hash_name(vm_arg_string(ctx, args[0]));
+        int count = argc > 1 ? PW_CLAMP(args[1].i, 1, 8) : 1, dir = argc > 3 ? args[3].i : 0, k;
+        float dist = argc > 2 ? args[2].f : 128.0f, base[3], yaw, sy, cy;
+        if (func == MWF_PLACEATPC || a < 0) {
+            base[0] = g->body.pos.x;
+            base[1] = g->body.pos.y;
+            base[2] = g->body.pos.z;
+            yaw = g->yaw;
+        } else {
+            base[0] = g->actors.list[a].pos.x;
+            base[1] = g->actors.list[a].pos.y;
+            base[2] = g->actors.list[a].pos.z;
+            yaw = g->actors.list[a].yaw;
+        }
+        yaw += dir == 1 ? 3.14159265f : dir == 2 ? -1.5707963f : dir == 3 ? 1.5707963f : 0.0f;
+        pw_sincosf(yaw, &sy, &cy);
+        for (k = 0; k < count; ++k) {
+            float p[3] = { base[0] + sy * dist + (float)k * 40.0f * cy, base[1] + cy * dist - (float)k * 40.0f * sy,
+                           base[2] };
+            if (ai_spawn(g, obj, p, yaw + 3.14159265f, 0, -1.0f) < 0) {
+                vm_notify(&g->rpg->vm, "PlaceAtPC: only creatures can be placed at run time.");
+                break;
+            }
+        }
+        return 1;
+    }
+    case MWF_PLAYSOUND:
+    case MWF_PLAYSOUNDVP:
+    case MWF_PLAYSOUND3D:
+    case MWF_PLAYSOUND3DVP:
+    case MWF_PLAYLOOPSOUND3D:
+    case MWF_PLAYLOOPSOUND3DVP: {
+        AudioPlayOpts o;
+        float p[3], zr;
+        int positional = func != MWF_PLAYSOUND && func != MWF_PLAYSOUNDVP;
+        int vp = func == MWF_PLAYSOUNDVP || func == MWF_PLAYSOUND3DVP || func == MWF_PLAYLOOPSOUND3DVP;
+        if (!g->audio)
+            return 1;
+        memset(&o, 0, sizeof(o));
+        o.owner = ref->key;
+        o.loop = func == MWF_PLAYLOOPSOUND3D || func == MWF_PLAYLOOPSOUND3DVP;
+        if (vp && argc >= 3) {
+            o.volume = PW_MAX(0.001f, args[1].f);
+            o.pitch = args[2].f;
+        }
+        if (positional && ref_position(g, ref, p, &zr)) {
+            p[2] += 64.0f;
+            o.pos = p;
+        }
+        audio_play_sound(g->audio, pw_hash_name(vm_arg_string(ctx, args[0])), &o);
+        return 1;
+    }
+    case MWF_STOPSOUND:
+        if (g->audio)
+            audio_stop(g->audio, ref->key, pw_hash_name(vm_arg_string(ctx, args[0])));
+        return 1;
+    case MWF_GETSOUNDPLAYING:
+        ret->i = g->audio ? audio_playing(g->audio, ref->key, pw_hash_name(vm_arg_string(ctx, args[0]))) : 0;
+        return 1;
+    case MWF_SAY: {
+        float p[3], zr;
+        uint32_t h = sound_file_hash(vm_arg_string(ctx, args[0]), "sound");
+        if (!g->audio || !h)
+            return 0; /* the VM shows the subtitle */
+        audio_say(g->audio, ref->key, h, ref_position(g, ref, p, &zr) ? p : NULL);
+        if (argc > 1 && *vm_arg_string(ctx, args[1]))
+            vm_notify(&g->rpg->vm, vm_arg_string(ctx, args[1]));
+        return 1;
+    }
+    case MWF_SAYDONE:
+        ret->i = g->audio ? !audio_saying(g->audio, ref->key) : 1;
+        return 1;
+    case MWF_STREAMMUSIC:
+        if (g->audio)
+            audio_stream_music(g->audio, sound_file_hash(vm_arg_string(ctx, args[0]), "music"));
+        return 1;
+    default:
+        return 0;
+    }
 }
 
 static int host_call(void *user, Vm *vm, uint16_t func, const VmRef *ref, const VmCtx *ctx,
@@ -676,7 +906,7 @@ static int host_call(void *user, Vm *vm, uint16_t func, const VmRef *ref, const 
         }
         return 0;
     default:
-        return 0;
+        return host_call_m6(g, func, ref, ctx, args, argc, ret);
     }
 }
 
@@ -686,7 +916,7 @@ static int host_find_ref(void *user, uint32_t object_hash, VmRef *out)
     uint32_t i;
     if (!g->zone.hdr)
         return 0;
-    for (i = 0; i < g->zone.hdr->instance_count; ++i) {
+    for (i = 0; i < g->zone.instance_count; ++i) {
         if (g->zone.instances[i].object_hash == object_hash) {
             *out = game_instance_ref(g, i);
             return 1;
@@ -709,7 +939,7 @@ static int host_interior(void *user)
 static void host_set_disabled(void *user, const VmRef *ref, int disabled)
 {
     Game *g = (Game *)user;
-    if (g->zone.hdr && ref->inst >= 0 && (uint32_t)ref->inst < g->zone.hdr->instance_count)
+    if (g->zone.hdr && ref->inst >= 0 && (uint32_t)ref->inst < g->zone.instance_count)
         g->zone.inst_hidden[ref->inst] = (uint8_t)(disabled != 0);
 }
 
@@ -739,6 +969,7 @@ int game_attach_rpg(Game *g, GameRpg *rpg, const char *data_dir, char *err, uint
         rh.locate = rpg_locate;
         rh.killed = rpg_killed;
         rh.hostiles_near = rpg_hostiles;
+        rh.summon = rpg_summon;
         if (rpg_init(&rpg->rpg, &rpg->vm, &rpg->db, &rh) != 0) {
             snprintf(err, errlen, "rpg.dpak lacks the v2 rules tables");
             return -1;
@@ -778,39 +1009,22 @@ static void update_actors(Game *g, float dt)
 {
     uint32_t i;
     g->phys.obstacle_count = 0;
+    /* actors walk around the player and each other */
+    if (g->rpg) {
+        PhysObstacle *o = &g->phys.obstacles[g->phys.obstacle_count++];
+        o->x = g->body.pos.x;
+        o->y = g->body.pos.y;
+        o->z = g->body.pos.z;
+        o->radius = BODY_RADIUS;
+        o->height = BODY_HEIGHT;
+        o->id = GAME_PLAYER_OBSTACLE;
+    }
     for (i = 0; i < g->actors.count; ++i) {
-        Actor *a = &g->actors.list[i];
+        const Actor *a = &g->actors.list[i];
         float dx = g->body.pos.x - a->pos.x, dy = g->body.pos.y - a->pos.y;
-        float d2 = dx * dx + dy * dy;
-        if (g->rpg && g->actor_timer) {
-            VmRef r = game_actor_ref(g, i);
-            if (rpg_is_dead(&g->rpg->rpg, &r))
-                continue; /* corpses neither turn nor block */
-            if (vm_prop(&g->rpg->vm, &r, MWP_HOSTILE) != 0.0f) {
-                actor_combat(g, i, dt);
-                dx = g->body.pos.x - a->pos.x;
-                dy = g->body.pos.y - a->pos.y;
-                d2 = dx * dx + dy * dy;
-                goto obstacle;
-            }
-        }
-        if (a->rec->flags & DZONE_ACTOR_F_CREATURE) {
-            /* creatures idle in place until AI (Milestone 6) */
-        } else if (d2 < ACTOR_FACE_DIST * ACTOR_FACE_DIST) {
-            /* NPCs turn to face the player (Morrowind z rotation is clockwise) */
-            float want = atan2f(dx, dy), diff = pw_wrap_angle(want - a->yaw);
-            float step = 2.5f * dt;
-            if (diff > step)
-                diff = step;
-            else if (diff < -step)
-                diff = -step;
-            if (fabsf(diff) > 1e-4f) {
-                Vec4 p = a->pos;
-                actor_set_placement(a, &p, pw_wrap_angle(a->yaw + diff));
-            }
-        }
-    obstacle:
-        if (g->phys.obstacle_count < PHYS_MAX_OBSTACLES && d2 < 1024.0f * 1024.0f) {
+        if (g->zone.inst_hidden[a->instance] || actor_dead(g, i))
+            continue; /* corpses and the vanished neither move nor block */
+        if (g->phys.obstacle_count < PHYS_MAX_OBSTACLES && dx * dx + dy * dy < 1024.0f * 1024.0f) {
             PhysObstacle *o = &g->phys.obstacles[g->phys.obstacle_count++];
             o->x = a->pos.x;
             o->y = a->pos.y;
@@ -818,6 +1032,21 @@ static void update_actors(Game *g, float dt)
             o->radius = BODY_RADIUS * a->scale;
             o->height = BODY_HEIGHT * a->scale;
             o->id = i;
+        }
+    }
+    if (g->rpg) {
+        ai_update(g, dt);
+    } else {
+        /* exploration only: NPCs turn to face the player */
+        for (i = 0; i < g->actors.count; ++i) {
+            Actor *a = &g->actors.list[i];
+            float dx = g->body.pos.x - a->pos.x, dy = g->body.pos.y - a->pos.y;
+            if (!(a->rec->flags & DZONE_ACTOR_F_CREATURE) && dx * dx + dy * dy < ACTOR_FACE_DIST * ACTOR_FACE_DIST) {
+                float want = atan2f(dx, dy), diff = pw_wrap_angle(want - a->yaw), step = 2.5f * dt;
+                Vec4 p = a->pos;
+                diff = PW_CLAMP(diff, -step, step);
+                actor_set_placement(a, &p, pw_wrap_angle(a->yaw + diff));
+            }
         }
     }
     {
@@ -951,6 +1180,245 @@ static int door_lock(Game *g, uint32_t inst)
     return lock;
 }
 
+/* ------------------------------------------------------------------------ */
+/* sounds, crime                                                            */
+/* ------------------------------------------------------------------------ */
+void game_sound(Game *g, const char *id)
+{
+    AudioPlayOpts o;
+    if (!g->audio)
+        return;
+    memset(&o, 0, sizeof(o));
+    audio_play_sound(g->audio, pw_hash_name(id), &o);
+}
+
+static void sound_at(Game *g, uint32_t sound, const float pos[3], uint32_t owner)
+{
+    AudioPlayOpts o;
+    if (!g->audio || !sound)
+        return;
+    memset(&o, 0, sizeof(o));
+    o.pos = pos;
+    o.owner = owner;
+    audio_play_sound(g->audio, sound, &o);
+}
+
+/* the player's footsteps: boots weight picks the sound, like the original */
+static void player_steps(Game *g, const Vec4 *before)
+{
+    float dx = g->body.pos.x - before->x, dy = g->body.pos.y - before->y;
+    const char *side;
+    if (!g->audio || !g->rpg || g->flying || (!g->body.on_ground && !g->body.swimming))
+        return;
+    g->step_dist += sqrtf(dx * dx + dy * dy);
+    if (g->step_dist < (g->running ? 170.0f : 120.0f))
+        return;
+    g->step_dist = 0.0f;
+    g->step_side ^= 1;
+    if (g->body.swimming) {
+        side = g->step_side ? "Swim Right" : "Swim Left";
+    } else {
+        Rpg *r = &g->rpg->rpg;
+        VmRef pc = vm_player_ref(&g->rpg->vm);
+        int st = rpg_equipped(r, &pc, RPG_SLOT_BOOTS);
+        const VmItem *it = st >= 0 ? vm_item_at(&g->rpg->vm, st) : NULL;
+        const DRpgObject *o = it ? rpg_object(r, it->item) : NULL;
+        float w = o && o->type == DRPG_OT_ARMO ? o->weight : 0.0f;
+        float boots = (float)rpg_gmst_i(r, "iBootsWeight", 20);
+        if (!o || o->type != DRPG_OT_ARMO)
+            side = g->step_side ? "FootBareRight" : "FootBareLeft";
+        else if (w <= boots * rpg_gmst_f(r, "fLightMaxMod", 0.6f))
+            side = g->step_side ? "FootLightRight" : "FootLightLeft";
+        else if (w <= boots * rpg_gmst_f(r, "fMedMaxMod", 0.9f))
+            side = g->step_side ? "FootMedRight" : "FootMedLeft";
+        else
+            side = g->step_side ? "FootHeavyRight" : "FootHeavyLeft";
+    }
+    {
+        AudioPlayOpts o;
+        memset(&o, 0, sizeof(o));
+        o.cat = AUDIO_CAT_FOOTSTEPS;
+        audio_play_sound(g->audio, pw_hash_name(side), &o);
+    }
+}
+
+static uint32_t region_here(const Game *g)
+{
+    const DZoneHeader *h = g->zone.hdr;
+    int cx = (int)floorf(g->body.pos.x / 8192.0f), cy = (int)floorf(g->body.pos.y / 8192.0f);
+    uint32_t i;
+    if (!h || h->kind != DZONE_KIND_EXTERIOR)
+        return 0;
+    for (i = 0; i < h->cell_count; ++i)
+        if (g->zone.cells[i].x == cx && g->zone.cells[i].y == cy)
+            return g->zone.cells[i].region_hash;
+    return 0;
+}
+
+/* listener, music mode, looping light sounds, region ambience */
+static void game_audio_frame(Game *g, float dt)
+{
+    Audio *a = g->audio;
+    float eye[3];
+    uint32_t i, k;
+    if (!a)
+        return;
+    eye[0] = g->body.pos.x;
+    eye[1] = g->body.pos.y;
+    eye[2] = g->body.pos.z + eye_height(g);
+    audio_set_listener(a, eye, g->yaw);
+    audio_music_mode(a, g->ai.combat > 0 ? AUDIO_MUSIC_BATTLE : AUDIO_MUSIC_EXPLORE);
+    if (g->rpg && !g->menu_mode) {
+        /* the four nearest lights with a looping sound */
+        g->light_timer -= dt;
+        if (g->light_timer <= 0.0f) {
+            uint32_t pick[4] = { 0, 0, 0, 0 };
+            float best[4] = { 1e30f, 1e30f, 1e30f, 1e30f };
+            g->light_timer = 1.0f;
+            for (i = 0; i < g->zone.instance_count; ++i) {
+                const DZoneInstance *in = &g->zone.instances[i];
+                const DRpgObject *o;
+                float dx, dy, d;
+                if (in->kind != DZONE_INST_LIGHT || g->zone.inst_hidden[i])
+                    continue;
+                o = rpgdb_object(&g->rpg->db, in->object_hash);
+                if (!o || !o->link[2])
+                    continue;
+                dx = in->pos[0] - eye[0];
+                dy = in->pos[1] - eye[1];
+                d = dx * dx + dy * dy;
+                if (d > 1500.0f * 1500.0f)
+                    continue;
+                for (k = 0; k < 4; ++k)
+                    if (d < best[k]) {
+                        uint32_t m;
+                        for (m = 3; m > k; --m) {
+                            best[m] = best[m - 1];
+                            pick[m] = pick[m - 1];
+                        }
+                        best[k] = d;
+                        pick[k] = i + 1;
+                        break;
+                    }
+            }
+            /* stop loops no longer picked, start new ones */
+            for (k = 0; k < 4; ++k) {
+                uint32_t m, keep = 0;
+                for (m = 0; m < 4; ++m)
+                    keep |= g->light_inst[k] && pick[m] == g->light_inst[k];
+                if (!keep && g->light_voice[k]) {
+                    audio_stop_handle(a, g->light_voice[k]);
+                    g->light_voice[k] = 0;
+                    g->light_inst[k] = 0;
+                }
+            }
+            for (i = 0; i < 4; ++i) {
+                uint32_t m, have = 0;
+                if (!pick[i])
+                    continue;
+                for (m = 0; m < 4; ++m)
+                    have |= g->light_inst[m] == pick[i];
+                if (have)
+                    continue;
+                for (m = 0; m < 4; ++m)
+                    if (!g->light_inst[m]) {
+                        const DZoneInstance *in = &g->zone.instances[pick[i] - 1];
+                        const DRpgObject *o = rpgdb_object(&g->rpg->db, in->object_hash);
+                        AudioPlayOpts op;
+                        memset(&op, 0, sizeof(op));
+                        op.pos = in->pos;
+                        op.loop = 1;
+                        g->light_inst[m] = pick[i];
+                        g->light_voice[m] = audio_play_sound(a, o->link[2], &op);
+                        break;
+                    }
+            }
+        }
+        /* region ambience: a roll every ten seconds outdoors */
+        g->ambient_timer -= dt;
+        if (g->ambient_timer <= 0.0f) {
+            const DRpgObject *reg = rpgdb_object(&g->rpg->db, region_here(g));
+            g->ambient_timer = 10.0f;
+            if (reg && reg->type == DRPG_OT_REGN) {
+                for (k = 0; k < reg->list2_count; ++k) {
+                    const DRpgListItem *li = &g->rpg->db.lists[reg->list2_first + k];
+                    if ((int32_t)(vm_random(&g->rpg->vm) % 100u) < li->count) {
+                        AudioPlayOpts op;
+                        memset(&op, 0, sizeof(op));
+                        op.volume = 0.6f;
+                        audio_play_sound(a, li->hash, &op);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    audio_update(a, dt);
+}
+
+int game_actor_index(const Game *g, uint32_t key)
+{
+    uint32_t i;
+    if (!g->rpg)
+        return -1;
+    for (i = 0; i < g->actors.count; ++i)
+        if (game_actor_ref(g, i).key == key)
+            return (int)i;
+    return -1;
+}
+
+static int spell_harmful(Game *g, const RpgCast *c)
+{
+    int k;
+    for (k = 0; k < c->count; ++k) {
+        const DRpgMgef *m = rpgdb_mgef(&g->rpg->db, c->effects[k].effect);
+        if (m && (m->flags & DRPG_MF_HARMFUL))
+            return 1;
+    }
+    return 0;
+}
+
+/* the player attacked an actor (hit or not): it fights back; attacking a
+ * peaceful NPC is a crime */
+static void assault(Game *g, int actor, int peaceful, int killed, int hit)
+{
+    if (!killed) {
+        if (hit)
+            ai_attacked(g, actor, AI_TARGET_PLAYER);
+        else
+            ai_start_combat(g, actor, AI_TARGET_PLAYER);
+    }
+    if (peaceful && !(g->actors.list[actor].rec->flags & DZONE_ACTOR_F_CREATURE))
+        ai_crime(g, killed ? AI_CRIME_MURDER : AI_CRIME_ASSAULT, actor, 0, 0);
+}
+
+int game_theft(Game *g, uint32_t owner, uint32_t item, int32_t count)
+{
+    Rpg *r;
+    const DRpgObject *o;
+    VmItem probe;
+    int value;
+    uint32_t i;
+    if (!g->rpg || !owner)
+        return 0;
+    r = &g->rpg->rpg;
+    /* goods of the player's own faction are fair game */
+    if (rpgdb_faction(&g->rpg->db, owner) && vm_pc_rank(&g->rpg->vm, owner) >= 0)
+        return 0;
+    for (i = 0; i < g->actors.count; ++i)
+        if (g->zone.instances[g->actors.list[i].instance].object_hash == owner && actor_dead(g, i))
+            return 0; /* the dead own nothing */
+    o = rpg_object(r, item);
+    memset(&probe, 0, sizeof(probe));
+    probe.item = item;
+    probe.count = 1;
+    probe.health = VM_FULL;
+    probe.charge = -1.0f;
+    value = o ? rpg_item_value(r, &probe) * count : 0;
+    ai_mark_stolen(g, item, count);
+    return ai_crime(g, AI_CRIME_THEFT, -1, owner, value);
+}
+
 static void player_attack(Game *g, float strength)
 {
     Rpg *r = &g->rpg->rpg;
@@ -965,8 +1433,12 @@ static void player_attack(Game *g, float strength)
         int lvl;
         if (g->target != GAME_NO_TARGET && g->zone.instances[g->target].kind == DZONE_INST_DOOR) {
             VmRef d = game_instance_ref(g, g->target);
-            if (rpg_pick_lock(r, &d, door_lock(g, g->target), &lvl, msg, sizeof(msg)) && lvl == 0)
+            if (rpg_pick_lock(r, &d, door_lock(g, g->target), &lvl, msg, sizeof(msg)) && lvl == 0) {
                 vm_set_prop(&g->rpg->vm, &d, MWP_LOCK, -1.0f);
+                game_sound(g, "Open Lock");
+            } else {
+                game_sound(g, "Open Lock Fail");
+            }
             game_message(g, msg);
         }
         return;
@@ -982,6 +1454,7 @@ static void player_attack(Game *g, float strength)
     } else {
         reach = rpg_weapon_reach(r, &pc) + BODY_RADIUS;
     }
+    game_sound(g, "Weapon Swish");
     a = ray_actor(g, reach, &t);
     if (a < 0) {
         /* a swing at the air still costs fatigue */
@@ -990,12 +1463,18 @@ static void player_attack(Game *g, float strength)
     }
     {
         VmRef v = game_actor_ref(g, (uint32_t)a);
+        int peaceful = vm_prop(&g->rpg->vm, &v, MWP_HOSTILE) == 0.0f;
         RpgHit h = rpg_attack(r, &pc, &v, strength);
         hit_message(g, &h, game_instance_name(g, g->actors.list[a].instance));
         g->enemy_key = v.key;
         g->enemy_time = 6.0f;
-        if (h.hit && !h.killed)
-            actor_play(&g->actors.list[a], pw_hash_name("hit1"), 0);
+        if (h.hit) {
+            float p[3] = { g->actors.list[a].pos.x, g->actors.list[a].pos.y, g->actors.list[a].pos.z + 64.0f };
+            sound_at(g, pw_hash_name(w ? "Health Damage" : "Hand To Hand Hit"), p, v.key);
+            if (!h.killed)
+                actor_play(&g->actors.list[a], pw_hash_name("hit1"), 0);
+        }
+        assault(g, a, peaceful, h.killed, h.hit);
     }
 }
 
@@ -1029,7 +1508,17 @@ static void player_cast(Game *g)
     RpgCast c;
     if (!rpg_begin_cast(r, &pc, &c)) {
         game_message(g, c.message[0] ? c.message : "You cannot cast that.");
+        if (c.count > 0)
+            game_sound(g, "Spell Failure Destruction");
         return;
+    }
+    if (c.count > 0) {
+        const DRpgMgef *m = rpgdb_mgef(r->db, c.effects[0].effect);
+        if (m && g->audio) {
+            AudioPlayOpts o;
+            memset(&o, 0, sizeof(o));
+            audio_play_sound(g->audio, m->sound[0], &o);
+        }
     }
     if (c.has[RPG_RANGE_SELF])
         rpg_apply(r, &pc, &pc, c.effects, c.count, RPG_RANGE_SELF, c.source, c.chance, 1);
@@ -1038,7 +1527,10 @@ static void player_cast(Game *g)
         int a = ray_actor(g, GAME_ACTIVATE_DIST, &t);
         if (a >= 0) {
             VmRef v = game_actor_ref(g, (uint32_t)a);
-            rpg_apply(r, &pc, &v, c.effects, c.count, RPG_RANGE_TOUCH, c.source, c.chance, 1);
+            int peaceful = vm_prop(&g->rpg->vm, &v, MWP_HOSTILE) == 0.0f;
+            if (rpg_apply(r, &pc, &v, c.effects, c.count, RPG_RANGE_TOUCH, c.source, c.chance, 1) > 0 &&
+                spell_harmful(g, &c))
+                assault(g, a, peaceful, actor_dead(g, (uint32_t)a), 1);
             g->enemy_key = v.key;
             g->enemy_time = 6.0f;
         } else if (g->target != GAME_NO_TARGET) {
@@ -1056,8 +1548,12 @@ static void player_cast(Game *g)
         memset(&v, 0, sizeof(v));
         view_ray(g, &o, &d);
         if (a >= 0) {
+            int peaceful;
             v = game_actor_ref(g, (uint32_t)a);
-            rpg_apply(r, &pc, &v, c.effects, c.count, RPG_RANGE_TARGET, c.source, c.chance, 1);
+            peaceful = vm_prop(&g->rpg->vm, &v, MWP_HOSTILE) == 0.0f;
+            if (rpg_apply(r, &pc, &v, c.effects, c.count, RPG_RANGE_TARGET, c.source, c.chance, 1) > 0 &&
+                spell_harmful(g, &c))
+                assault(g, a, peaceful, actor_dead(g, (uint32_t)a), 1);
             g->enemy_key = v.key;
             g->enemy_time = 6.0f;
         } else if (phys_raycast(&g->phys, &o, &d, 4096.0f, &wall_t, &wall_inst)) {
@@ -1069,45 +1565,6 @@ static void player_cast(Game *g)
         apply_area(g, &c, &pc, &at, v.key);
     }
     game_message(g, rpg_spell_name(r, c.source)[0] ? rpg_spell_name(r, c.source) : "Cast.");
-}
-
-/* hostile actors turn on the player, close in and strike (in place of the
- * full AI packages of Milestone 6) */
-static void actor_combat(Game *g, uint32_t i, float dt)
-{
-    Rpg *r = &g->rpg->rpg;
-    Actor *a = &g->actors.list[i];
-    VmRef self = game_actor_ref(g, i), pc = vm_player_ref(&g->rpg->vm);
-    float dx = g->body.pos.x - a->pos.x, dy = g->body.pos.y - a->pos.y, d = sqrtf(dx * dx + dy * dy);
-    float reach = rpg_weapon_reach(r, &self) + BODY_RADIUS * 2.0f;
-    float want = atan2f(dx, dy);
-    Vec4 p = a->pos;
-    if (d > 3000.0f || g->player_dead || rpg_effect(r, &self, MGEF_PARALYZE, -1) > 0.0f)
-        return;
-    if (d > reach * 0.9f) {
-        float step = rpg_walk_speed(r, &self) * dt, ground;
-        if (step > d - reach * 0.8f)
-            step = d - reach * 0.8f;
-        p.x += dx / d * step;
-        p.y += dy / d * step;
-        if (phys_ground(&g->phys, p.x, p.y, p.z + PHYS_STEP_UP, &ground) && ground > p.z - 256.0f)
-            p.z = ground;
-    }
-    actor_set_placement(a, &p, want);
-    if (g->actor_timer[i] > 0.0f)
-        g->actor_timer[i] -= dt;
-    if (d <= reach && g->actor_timer[i] <= 0.0f) {
-        float strength = 0.5f + 0.5f * vm_random01(&g->rpg->vm);
-        RpgHit h = rpg_attack(r, &self, &pc, strength);
-        actor_play(a, pw_hash_name("attack1"), 0);
-        g->actor_timer[i] = 1.2f + 0.8f * vm_random01(&g->rpg->vm);
-        if (h.hit && h.damage > 0.0f) {
-            char buf[80];
-            snprintf(buf, sizeof(buf), "%s hits you for %d.", game_instance_name(g, a->instance),
-                     (int)(h.damage + 0.5f));
-            game_message(g, buf);
-        }
-    }
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1157,6 +1614,47 @@ static void rpg_killed(void *user, const VmRef *ref)
     }
 }
 
+static int rpg_summon(void *user, const VmRef *caster, uint32_t creature, int effect, float duration)
+{
+    Game *g = (Game *)user;
+    float pos[3], yaw;
+    uint32_t i;
+    int idx;
+    if (caster->kind == VM_REF_PLAYER) {
+        float sy, cy;
+        pw_sincosf(g->yaw, &sy, &cy);
+        pos[0] = g->body.pos.x + sy * 120.0f;
+        pos[1] = g->body.pos.y + cy * 120.0f;
+        pos[2] = g->body.pos.z;
+        yaw = g->yaw;
+    } else {
+        int a = game_actor_index(g, caster->key);
+        if (a < 0)
+            return 0;
+        pos[0] = g->actors.list[a].pos.x + 100.0f;
+        pos[1] = g->actors.list[a].pos.y;
+        pos[2] = g->actors.list[a].pos.z;
+        yaw = g->actors.list[a].yaw;
+    }
+    /* one creature per effect and caster: a new casting replaces it */
+    for (i = 0; i < g->actors.count && g->ai.actors; ++i) {
+        AiActor *s = &g->ai.actors[i];
+        if (s->state != AI_GONE && s->summoner == caster->key && s->summon_effect == effect && s->life >= 0.0f)
+            ai_despawn(g, (int)i);
+    }
+    idx = ai_spawn(g, creature, pos, yaw, caster->kind == VM_REF_PLAYER, duration);
+    if (idx < 0)
+        return 0;
+    g->ai.actors[idx].summoner = caster->key;
+    g->ai.actors[idx].summon_effect = effect;
+    if (caster->kind != VM_REF_PLAYER) {
+        int a = game_actor_index(g, caster->key);
+        if (a >= 0 && g->ai.actors[a].state == AI_COMBAT)
+            ai_start_combat(g, idx, g->ai.actors[a].target);
+    }
+    return 1;
+}
+
 static int rpg_hostiles(void *user, float radius)
 {
     Game *g = (Game *)user;
@@ -1203,7 +1701,7 @@ static void game_rpg_tick(Game *g, float dt)
         VmRef r = vm->force_greeting;
         vm->has_force_greeting = 0;
         if (!g->rpg->dlg.active && r.inst >= 0 && g->ui_event == GAME_UI_NONE)
-            start_dialogue(g, (uint32_t)r.inst);
+            game_talk(g, (uint32_t)r.inst);
     }
 }
 
@@ -1223,6 +1721,7 @@ void game_update(Game *g, const InputState *in, float dt)
     if (g->menu_mode) {
         /* menus pause the world; scripts keep running and see MenuMode */
         game_rpg_tick(g, dt);
+        game_audio_frame(g, dt);
         return;
     }
     if (g->controls_disabled) {
@@ -1333,7 +1832,9 @@ void game_update(Game *g, const InputState *in, float dt)
             VmRef pc = vm_player_ref(&g->rpg->vm);
             jump_speed = rpg_jump_speed(&g->rpg->rpg, &pc);
         }
+        Vec4 before = g->body.pos;
         phys_move(&g->phys, &g->body, &wish, jump, jump_speed, dt);
+        player_steps(g, &before);
         if (g->rpg && !g->flying) {
             if (jump && grounded && !g->body.on_ground)
                 rpg_player_jumped(&g->rpg->rpg);
@@ -1342,8 +1843,10 @@ void game_update(Game *g, const InputState *in, float dt)
                     g->fall_top = g->body.pos.z;
                 g->was_airborne = 1;
             } else {
-                if (g->was_airborne && g->body.on_ground)
+                if (g->was_airborne && g->body.on_ground) {
                     rpg_player_landed(&g->rpg->rpg, g->fall_top - g->body.pos.z);
+                    game_sound(g, "DefaultLand");
+                }
                 g->was_airborne = 0;
             }
         }
@@ -1387,5 +1890,6 @@ void game_update(Game *g, const InputState *in, float dt)
             rpg_visit_cell(&g->rpg->rpg, cx, cy2);
     }
     game_rpg_tick(g, dt);
+    game_audio_frame(g, dt);
     check_zone_border(g);
 }

@@ -43,10 +43,14 @@ typedef struct {
 typedef struct {
     Actor *list;
     uint32_t count;
+    uint32_t capacity;     /* cooked actors + ZONE_SPAWN_SLOTS */
+    uint32_t frame;        /* update counter (level of detail staggering) */
 } ActorSet;
 
 /* Builds the runtime actors of a loaded zone (ZONE region). */
 int actors_init(ActorSet *s, const Zone *z);
+/* Adds the actor of a spawned record (zone_spawn_creature); index or -1. */
+int actor_spawn(ActorSet *s, const Zone *z, uint32_t rec_index);
 /* Starts a group by name hash; unknown groups fall back to "idle". */
 void actor_play(Actor *a, uint32_t group_hash, int loop);
 void actor_set_placement(Actor *a, const Vec4 *pos, float yaw);

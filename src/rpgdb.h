@@ -56,6 +56,9 @@ typedef struct {
     const DRpgRace *races;
     const DRpgTravel *travel;
     const DRpgMarker *markers;
+    const DRpgAiPackage *aipkgs;
+    const DRpgSound *sounds;
+    const DRpgSoundGen *soundgens;
     const char *names;
     uint32_t names_size;
     /* text cache */
@@ -92,6 +95,9 @@ int rpgdb_script(const RpgDb *db, uint32_t hash);       /* index or -1 */
 const DRpgVar *rpgdb_script_var(const RpgDb *db, uint32_t script, uint32_t var_hash);
 int rpgdb_topic(const RpgDb *db, uint32_t hash);        /* index or -1 */
 const DRpgRace *rpgdb_race(const RpgDb *db, uint32_t hash);
+const DRpgSound *rpgdb_sound(const RpgDb *db, uint32_t hash);   /* SOUN by id hash */
+/* SNDG sound for a creature (falls back to the creature-less default rows) */
+uint32_t rpgdb_soundgen(const RpgDb *db, uint32_t creature, int type);
 const DRpgMgef *rpgdb_mgef(const RpgDb *db, int effect); /* NULL when out of range */
 const char *rpgdb_topic_name(const RpgDb *db, uint32_t topic);
 

@@ -421,13 +421,24 @@ int zone_load(World *w, Zone *z, uint32_t zi, char *err, uint32_t errlen)
     z->tex = (const DTexHeader **)mem_try_alloc(MEM_REGION_ZONE,
                                                 (h->texture_count + 1u) * sizeof(void *), 4);
     z->batch_model = (Mat4 *)mem_try_alloc(MEM_REGION_ZONE, (h->batch_count + 1u) * sizeof(Mat4), 64);
-    z->meshes = (ZoneMesh *)mem_try_alloc(MEM_REGION_ZONE, (h->mesh_count + 1u) * sizeof(ZoneMesh), 16);
+    z->meshes = (ZoneMesh *)mem_try_alloc(MEM_REGION_ZONE,
+                                          (h->mesh_count + ZONE_EXTRA_MESHES + 1u) * sizeof(ZoneMesh), 16);
+    z->extra_hashes = (uint32_t *)mem_try_alloc(MEM_REGION_ZONE, ZONE_EXTRA_MESHES * sizeof(uint32_t), 4);
     z->inst_world = (Mat4 *)mem_try_alloc(MEM_REGION_ZONE,
-                                          (h->instance_count + 1u) * sizeof(Mat4), 64);
-    z->inst_scratch = (uint8_t *)mem_try_alloc(MEM_REGION_ZONE, h->instance_count + 1u, 4);
-    z->inst_hidden = (uint8_t *)mem_try_alloc(MEM_REGION_ZONE, h->instance_count + 1u, 4);
+                                          (h->instance_count + ZONE_SPAWN_SLOTS + 1u) * sizeof(Mat4), 64);
+    z->inst_scratch = (uint8_t *)mem_try_alloc(MEM_REGION_ZONE, h->instance_count + ZONE_SPAWN_SLOTS + 1u, 4);
+    z->inst_hidden = (uint8_t *)mem_try_alloc(MEM_REGION_ZONE, h->instance_count + ZONE_SPAWN_SLOTS + 1u, 4);
+    z->inst_rw = (DZoneInstance *)mem_try_alloc(MEM_REGION_ZONE,
+                                                (h->instance_count + ZONE_SPAWN_SLOTS) * sizeof(DZoneInstance), 16);
+    z->actor_rw = (DZoneActor *)mem_try_alloc(MEM_REGION_ZONE,
+                                              (h->actor_count + ZONE_SPAWN_SLOTS) * sizeof(DZoneActor), 16);
+    if (!z->extra_hashes || !z->inst_rw || !z->actor_rw)
+        ZONE_FAIL("zone %u: out of zone memory for spawn tables", (unsigned)zi);
+    memcpy(z->inst_rw, z->instances, h->instance_count * sizeof(DZoneInstance));
+    z->instances = z->inst_rw;
+    z->instance_count = h->instance_count;
     if (z->inst_hidden)
-        memset(z->inst_hidden, 0, h->instance_count + 1u);
+        memset(z->inst_hidden, 0, h->instance_count + ZONE_SPAWN_SLOTS + 1u);
     z->terrain_scratch = (uint8_t *)mem_try_alloc(MEM_REGION_ZONE, h->terrain_count + 1u, 4);
     if (!z->tex || !z->batch_model || !z->meshes || !z->inst_world || !z->inst_scratch || !z->inst_hidden ||
         !z->terrain_scratch)
@@ -436,6 +447,8 @@ int zone_load(World *w, Zone *z, uint32_t zi, char *err, uint32_t errlen)
         z->tex[i] = texcache_get(&w->tex, z->textures[i].hash);
     for (i = 0; i < h->batch_count; ++i)
         dequant_matrix(&z->batch_model[i], &z->batches[i]);
+    memset(z->meshes, 0, (h->mesh_count + ZONE_EXTRA_MESHES + 1u) * sizeof(ZoneMesh));
+    z->mesh_count = h->mesh_count;
     for (i = 0; i < h->mesh_count; ++i) {
         rc = load_mesh(w, &z->meshes[i], z->mesh_hashes[i]);
         if (rc == -2)
@@ -449,12 +462,16 @@ int zone_load(World *w, Zone *z, uint32_t zi, char *err, uint32_t errlen)
         const DZoneInstance *in = &z->instances[i];
         zone_placement_matrix(&z->inst_world[i], in->pos, in->rot, in->scale);
     }
-    z->actor_recs = (const DZoneActor *)(z->base + h->actors_ofs);
+    memcpy(z->actor_rw, z->base + h->actors_ofs, h->actor_count * sizeof(DZoneActor));
+    z->actor_recs = z->actor_rw;
+    z->actor_rec_count = h->actor_count;
     z->anim_hashes = (const uint32_t *)(z->base + h->anims_ofs);
-    z->anims = (Anim *)mem_try_alloc(MEM_REGION_ZONE, (h->anim_count + 1u) * sizeof(Anim), 16);
-    if (!z->anims)
+    z->anims = (Anim *)mem_try_alloc(MEM_REGION_ZONE, (h->anim_count + ZONE_EXTRA_ANIMS + 1u) * sizeof(Anim), 16);
+    z->extra_anim_hashes = (uint32_t *)mem_try_alloc(MEM_REGION_ZONE, ZONE_EXTRA_ANIMS * sizeof(uint32_t), 4);
+    if (!z->anims || !z->extra_anim_hashes)
         ZONE_FAIL("zone %u: out of zone memory for animations", (unsigned)zi);
-    memset(z->anims, 0, (h->anim_count + 1u) * sizeof(Anim));
+    memset(z->anims, 0, (h->anim_count + ZONE_EXTRA_ANIMS + 1u) * sizeof(Anim));
+    z->anim_count = h->anim_count;
     for (i = 0; i < h->anim_count; ++i) {
         uint32_t size = 0;
         const uint8_t *blob = w->anims.handle
@@ -469,6 +486,92 @@ int zone_load(World *w, Zone *z, uint32_t zi, char *err, uint32_t errlen)
     sceKernelDcacheWritebackAll();
 #endif
     return 0;
+}
+
+int zone_mesh_index(World *w, Zone *z, uint32_t hash)
+{
+    uint32_t i, n = z->hdr->mesh_count;
+    for (i = 0; i < n; ++i)
+        if (z->mesh_hashes[i] == hash)
+            return z->meshes[i].hdr ? (int)i : -1;
+    for (i = n; i < z->mesh_count; ++i)
+        if (z->extra_hashes[i - n] == hash)
+            return (int)i;
+    if (z->mesh_count >= n + ZONE_EXTRA_MESHES || !pak_find(&w->meshes, hash))
+        return -1;
+    if (load_mesh(w, &z->meshes[z->mesh_count], hash) != 0) {
+        memset(&z->meshes[z->mesh_count], 0, sizeof(ZoneMesh));
+        return -1;
+    }
+    z->extra_hashes[z->mesh_count - n] = hash;
+#if PW_PSP
+    sceKernelDcacheWritebackAll();
+#endif
+    return (int)z->mesh_count++;
+}
+
+uint32_t zone_anim_index(World *w, Zone *z, uint32_t hash)
+{
+    uint32_t i, n = z->hdr->anim_count, size = 0;
+    const uint8_t *blob;
+    for (i = 0; i < n; ++i)
+        if (z->anim_hashes[i] == hash)
+            return z->anims[i].hdr ? i : DZONE_NONE;
+    for (i = n; i < z->anim_count; ++i)
+        if (z->extra_anim_hashes[i - n] == hash)
+            return i;
+    if (z->anim_count >= n + ZONE_EXTRA_ANIMS || !w->anims.handle)
+        return DZONE_NONE;
+    blob = (const uint8_t *)pak_load(&w->anims, hash, MEM_REGION_ZONE, 16, &size);
+    if (!blob || anim_bind(&z->anims[z->anim_count], blob, size) != 0)
+        return DZONE_NONE;
+    z->extra_anim_hashes[z->anim_count - n] = hash;
+    return z->anim_count++;
+}
+
+int zone_spawn_creature(World *w, Zone *z, uint32_t object_hash, uint32_t skel_hash, uint32_t anim_hash,
+                        const float pos[3], float yaw, float scale, uint32_t *rec_out)
+{
+    DZoneInstance *in;
+    DZoneActor *rec;
+    int mesh;
+    uint32_t inst, anim;
+    if (!z->hdr || z->instance_count >= z->hdr->instance_count + ZONE_SPAWN_SLOTS ||
+        z->actor_rec_count >= z->hdr->actor_count + ZONE_SPAWN_SLOTS)
+        return -1;
+    mesh = skel_hash ? zone_mesh_index(w, z, skel_hash) : -1;
+    if (mesh < 0)
+        return -1;
+    anim = anim_hash ? zone_anim_index(w, z, anim_hash) : DZONE_NONE;
+    inst = z->instance_count;
+    in = &z->inst_rw[inst];
+    memset(in, 0, sizeof(*in));
+    in->mesh = (uint16_t)mesh;
+    in->kind = DZONE_INST_CREATURE;
+    in->flags = DZONE_IF_ACTOR;
+    in->door = DZONE_NONE;
+    in->object_hash = object_hash;
+    in->refnum = ZONE_SPAWN_REFNUM | (++z->spawn_serial & 0xFFFFFFu);
+    memcpy(in->pos, pos, sizeof(in->pos));
+    in->rot[2] = yaw;
+    in->scale = scale > 0.0f ? scale : 1.0f;
+    in->bound[0] = pos[0];
+    in->bound[1] = pos[1];
+    in->bound[2] = pos[2] + 64.0f * in->scale;
+    in->bound[3] = 96.0f * in->scale;
+    zone_placement_matrix(&z->inst_world[inst], in->pos, in->rot, in->scale);
+    z->inst_hidden[inst] = 0;
+    z->inst_scratch[inst] = 0;
+    rec = &z->actor_rw[z->actor_rec_count];
+    memset(rec, 0, sizeof(*rec));
+    rec->instance = inst;
+    rec->skeleton = (uint16_t)mesh;
+    rec->anim = (uint16_t)anim;
+    rec->flags = DZONE_ACTOR_F_CREATURE;
+    rec->part_bone_ofs = 0;
+    *rec_out = z->actor_rec_count++;
+    z->instance_count++;
+    return (int)inst;
 }
 
 const ZoneMesh *zone_instance_mesh(const Zone *z, uint32_t inst)

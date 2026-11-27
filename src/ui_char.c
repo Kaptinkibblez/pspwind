@@ -11,8 +11,10 @@
  *                       increases of this level), then the level rises
  *   Rest / wait         hours with left/right, triangle until healed,
  *                       square toggles rest (heals) and wait
- *   Death               respawn at the zone start (saved games arrive with
- *                       milestone 6)
+ *   Death               load the newest save, or start again from the
+ *                       zone's entrance
+ *   Saves               eight slots (0 = quicksave) with name, level,
+ *                       place, game date and play time; save or load
  *   HUD                 health / magicka / fatigue bars, readied weapon or
  *                       spell, last enemy's health, crosshair, target and
  *                       game messages
@@ -587,11 +589,132 @@ static void draw_rest(Ui *ui, UiCanvas *c)
 }
 
 /* ------------------------------------------------------------------------ */
+/* saved games                                                              */
+/* ------------------------------------------------------------------------ */
+void ui_set_saves(Ui *ui, const char *dir, float *playtime)
+{
+    ui->save_dir = dir;
+    ui->playtime = playtime;
+}
+
+static void scan_slots(Ui *ui)
+{
+    int k;
+    for (k = 0; k < SAVE_SLOTS; ++k)
+        save_slot_info(ui->save_dir, k, &ui->slots[k]);
+}
+
+void ui_open_saves(Ui *ui, int saving)
+{
+    if (!ui->save_dir || !ui->g->rpg)
+        return;
+    ui->return_mode = ui->mode == UI_DEATH ? UI_DEATH : UI_NONE;
+    ui->mode = UI_SAVELOAD;
+    ui->save_mode = saving;
+    ui->sel = saving ? 1 : PW_MAX(0, save_latest(ui->save_dir));
+    ui->confirm = 0;
+    scan_slots(ui);
+}
+
+static void update_saves(Ui *ui, const InputState *in)
+{
+    uint32_t p = in->pressed;
+    int dummy = 0;
+    char err[120];
+    if (p & GB_CIRCLE) {
+        ui_close(ui);
+        return;
+    }
+    if (ui_list_nav(&ui->sel, &dummy, SAVE_SLOTS, SAVE_SLOTS, p))
+        ui->confirm = 0;
+    if (!(p & GB_CROSS))
+        return;
+    if (ui->save_mode) {
+        if (ui->slots[ui->sel].used && !ui->confirm) {
+            ui->confirm = 1;
+            ui_status(ui, "X again to overwrite this save.");
+            return;
+        }
+        if (save_game(ui->g, ui->save_dir, ui->sel, ui->playtime ? *ui->playtime : 0.0f, err, sizeof(err)) == 0) {
+            ui_toast(ui, "Game saved.");
+            ui->return_mode = UI_NONE;
+            ui_close(ui);
+        } else {
+            ui_status(ui, err);
+        }
+        ui->confirm = 0;
+        scan_slots(ui);
+        return;
+    }
+    if (!ui->slots[ui->sel].used) {
+        ui_status(ui, "This slot is empty.");
+        return;
+    }
+    if (load_game(ui->g, ui->save_dir, ui->sel, ui->playtime, err, sizeof(err)) == 0) {
+        ui_toast(ui, "Game loaded.");
+        ui->return_mode = UI_NONE;
+        ui_close(ui);
+    } else {
+        ui_status(ui, err);
+    }
+}
+
+static void draw_saves(Ui *ui, UiCanvas *c)
+{
+    static const char *const months[12] = { "Morning Star", "Sun's Dawn", "First Seed", "Rain's Hand",
+                                            "Second Seed", "Midyear", "Sun's Height", "Last Seed",
+                                            "Hearthfire", "Frostfall", "Sun's Dusk", "Evening Star" };
+    char buf[112];
+    int k;
+    ui_frame(c, 30, 16, 420, 240, C_PANEL);
+    ui_text_centered(c, 240, 24, C_TITLE, ui->save_mode ? "Save Game" : "Load Game");
+    for (k = 0; k < SAVE_SLOTS; ++k) {
+        const SaveSlotInfo *si = &ui->slots[k];
+        int y = 42 + k * 24;
+        if (k == ui->sel)
+            ui_rect(c, 40, y - 3, 400, 22, C_SEL_BG);
+        snprintf(buf, sizeof(buf), "%s", k == 0 ? "Quicksave" : "");
+        if (!si->used) {
+            snprintf(buf, sizeof(buf), "%d  %s", k, k == 0 ? "Quicksave  (empty)" : "(empty)");
+            ui_text(c, 46, y + 4, C_DIM, buf, -1);
+            continue;
+        }
+        {
+            int secs = (int)si->hdr.playtime, hh = (int)si->hdr.hour;
+            snprintf(buf, sizeof(buf), "%d  %s, level %d%s", k, si->hdr.name, si->hdr.level, k == 0 ? "  (quick)" : "");
+            ui_text_clipped(c, 46, y, C_TEXT, buf, 40);
+            snprintf(buf, sizeof(buf), "%d:%02d played", secs / 3600, (secs / 60) % 60);
+            ui_text(c, 434 - (int)strlen(buf) * UI_CHAR_W, y, C_DIM, buf, -1);
+            snprintf(buf, sizeof(buf), "   %s - %d %s, %d:00", si->hdr.cell, si->hdr.day,
+                     months[PW_CLAMP(si->hdr.month, 0, 11)], hh);
+            ui_text_clipped(c, 46, y + 9, C_DIM, buf, 64);
+        }
+    }
+    ui_text(c, 46, 240, C_DIM, ui->save_mode ? "X save   O back" : "X load   O back", -1);
+}
+
+/* ------------------------------------------------------------------------ */
 /* death                                                                    */
 /* ------------------------------------------------------------------------ */
 static void update_death(Ui *ui, const InputState *in)
 {
-    if (in->pressed & (GB_CROSS | GB_START)) {
+    char err[120];
+    int latest = ui->save_dir ? save_latest(ui->save_dir) : -1;
+    if ((in->pressed & GB_CROSS) && latest >= 0) {
+        if (load_game(ui->g, ui->save_dir, latest, ui->playtime, err, sizeof(err)) == 0) {
+            ui->return_mode = UI_NONE;
+            ui_close(ui);
+            ui_toast(ui, "Game loaded.");
+        } else {
+            ui_status(ui, err);
+        }
+        return;
+    }
+    if ((in->pressed & GB_TRIANGLE) && ui->save_dir) {
+        ui_open_saves(ui, 0);
+        return;
+    }
+    if (in->pressed & (GB_SQUARE | GB_START) || ((in->pressed & GB_CROSS) && latest < 0)) {
         game_respawn(ui->g);
         ui->return_mode = UI_NONE;
         ui_close(ui);
@@ -600,12 +723,17 @@ static void update_death(Ui *ui, const InputState *in)
 
 static void draw_death(Ui *ui, UiCanvas *c)
 {
-    (void)ui;
+    int latest = ui->save_dir ? save_latest(ui->save_dir) : -1;
     ui_rect(c, 0, 0, UI_SCREEN_W, UI_SCREEN_H, 0x90000030u);
-    ui_frame(c, 130, 100, 220, 60, C_PANEL);
-    ui_text_centered(c, 240, 110, C_BAD, "You have died.");
-    ui_text_centered(c, 240, 128, C_TEXT, "X  start again from here");
-    ui_text_centered(c, 240, 142, C_DIM, "(saved games arrive in M6)");
+    ui_frame(c, 120, 96, 240, 74, C_PANEL);
+    ui_text_centered(c, 240, 106, C_BAD, "You have died.");
+    if (latest >= 0) {
+        ui_text_centered(c, 240, 124, C_TEXT, "X  load the last save");
+        ui_text_centered(c, 240, 136, C_TEXT, "/\\  choose a save");
+        ui_text_centered(c, 240, 148, C_DIM, "[]  start again from here");
+    } else {
+        ui_text_centered(c, 240, 130, C_TEXT, "X  start again from here");
+    }
 }
 
 /* ------------------------------------------------------------------------ */
@@ -703,6 +831,9 @@ void ui_char_update(Ui *ui, const InputState *in)
     case UI_DEATH:
         update_death(ui, in);
         break;
+    case UI_SAVELOAD:
+        update_saves(ui, in);
+        break;
     default:
         break;
     }
@@ -722,6 +853,9 @@ void ui_char_draw(Ui *ui, UiCanvas *c)
         break;
     case UI_DEATH:
         draw_death(ui, c);
+        break;
+    case UI_SAVELOAD:
+        draw_saves(ui, c);
         break;
     default:
         break;

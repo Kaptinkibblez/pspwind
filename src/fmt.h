@@ -438,7 +438,7 @@ typedef struct {
     float rot[3];    /* Morrowind euler radians: R = Rx(-x) Ry(-y) Rz(-z) */
     float scale;
     float bound[4];  /* world-space bounding sphere */
-    uint32_t reserved;
+    uint32_t owner;  /* pw_hash_name of the owning NPC or faction id, 0 = nobody */
 } DZoneInstance;
 
 typedef struct {
@@ -558,7 +558,7 @@ typedef struct {
  * is block << 16 | offset) and "script/<id>" (bytecode + string pool).
  * All tables are 16-byte aligned inside the core; hashes are pw_hash_name()
  * of the lower-case record id. */
-#define DRPG_VERSION 2
+#define DRPG_VERSION 3
 #define DRPG_NONE 0xFFFFFFFFu
 #define DRPG_NONE16 0xFFFFu
 
@@ -590,7 +590,10 @@ typedef struct {
     DRpgTable mgefs;       /* DRpgMgef[143], magic effect index order */
     DRpgTable races;       /* DRpgRace, sorted by hash */
     DRpgTable travel;      /* DRpgTravel (NPC stat[1..2] = first, count) */
-    DRpgTable markers;     /* DRpgMarker (divine / temple intervention) */
+    DRpgTable markers;     /* DRpgMarker (divine / temple intervention, prison) */
+    DRpgTable aipkgs;      /* DRpgAiPackage (NPC_/CREA stat[3] = first, stat[4] = count) */
+    DRpgTable sounds;      /* DRpgSound, sorted by hash */
+    DRpgTable soundgens;   /* DRpgSoundGen, sorted by (creature, type) */
     uint32_t topic_hash_ofs; /* uint32 topic indices sorted by topic hash */
     uint32_t file_size;
     uint32_t reserved;
@@ -624,7 +627,9 @@ enum {
 /* Type specific fields (see docs/FORMATS.md):
  *   NPC_  link = race, class, faction; stat[0] = actor; list = inventory,
  *         list2 = spells
- *   CREA  stat[0] = actor, stat[1] = creature type, stat[2] = flags
+ *   CREA  stat[0] = actor, stat[1] = creature type, stat[2] = flags,
+ *         link[0] = "x" variant key hash (animation / preferred skeleton)
+ *   NPC_/CREA  stat[3], stat[4] = AI package range
  *   WEAP  link[0] = enchantment, link[1] = chop/slash min,max bytes,
  *         link[2] = thrust min,max; stat = type, health, speed (float bits),
  *         reach (float bits), enchant points, flags
@@ -836,6 +841,7 @@ typedef struct {
     int16_t resisted_by;   /* effect index or -1 */
     int16_t weakened_by;   /* effect index or -1 */
     uint16_t pad;
+    uint32_t sound[4];     /* cast, bolt, hit, area sound hashes (school default) */
 } DRpgMgef;
 
 typedef struct {
@@ -861,9 +867,74 @@ typedef struct {
     float pos[3];
     float rot_z;
     uint32_t cell;         /* hash of the lower-case interior name, 0 exterior */
-    uint8_t kind;          /* 0 divine (Imperial cult), 1 temple (Almsivi) */
+    uint8_t kind;          /* DRPG_MARKER_* */
     uint8_t pad[3];
 } DRpgMarker;
+
+enum { DRPG_MARKER_DIVINE = 0, DRPG_MARKER_TEMPLE = 1, DRPG_MARKER_PRISON = 2 };
+
+/* AI packages (record order; the first is the actor's current package) */
+enum { DRPG_AI_WANDER = 0, DRPG_AI_TRAVEL, DRPG_AI_ESCORT, DRPG_AI_FOLLOW, DRPG_AI_ACTIVATE };
+
+typedef struct {
+    float pos[3];          /* travel / escort destination */
+    uint32_t target;       /* escort / follow / activate target id hash */
+    uint32_t cell;         /* escort / follow destination cell hash (CNDT) or 0 */
+    uint16_t distance;     /* wander radius */
+    uint16_t duration;     /* wander / escort / follow hours, 0 = forever */
+    uint8_t type;          /* DRPG_AI_* */
+    uint8_t hour;          /* wander time of day */
+    uint8_t idle[8];       /* wander idle2..idle9 chances */
+    uint8_t pad[2];
+} DRpgAiPackage;
+
+/* SOUN: the sound file key is pw_hash_name("sound/" + path without extension) */
+typedef struct {
+    uint32_t hash;
+    uint32_t file;         /* sounds.dpak / music.dpak entry hash, 0 = none */
+    uint8_t volume;        /* 0..255 */
+    uint8_t min_range;     /* Morrowind range units (x fAudioMinDistanceMult) */
+    uint8_t max_range;
+    uint8_t pad;
+} DRpgSound;
+
+/* SNDG: creature sound generators (creature 0 = default for everyone) */
+enum { DRPG_SNDG_LEFT = 0, DRPG_SNDG_RIGHT, DRPG_SNDG_SWIM_LEFT, DRPG_SNDG_SWIM_RIGHT, DRPG_SNDG_MOAN,
+       DRPG_SNDG_ROAR, DRPG_SNDG_SCREAM, DRPG_SNDG_LAND, DRPG_SNDG_COUNT };
+typedef struct {
+    uint32_t creature;
+    uint32_t sound;        /* DRpgSound hash */
+    uint8_t type;          /* DRPG_SNDG_* */
+    uint8_t pad[3];
+} DRpgSoundGen;
+
+/* ---------------------------------------------------------------- DSND ---
+ * sounds.dpak / music.dpak entries (sound_demaker.py), keyed by
+ * pw_hash_name("sound/fx/foot/walk") or ("music/explore/mx_1"). */
+#define DSND_MAGIC 0x444E5344u /* "DSND" */
+enum { DSND_CODEC_ADPCM = 0, DSND_CODEC_MP3 = 1 };
+typedef struct {
+    uint32_t magic;
+    uint16_t version;      /* 1 */
+    uint8_t codec;         /* DSND_CODEC_* */
+    uint8_t channels;      /* 1 or 2 */
+    uint32_t rate;         /* Hz */
+    uint32_t samples;      /* frames per channel */
+    uint16_t block_bytes;  /* ADPCM: bytes per channel block (4-byte header + nibbles) */
+    uint16_t block_samples;/* ADPCM: frames per block (first one in the header) */
+    uint32_t data_size;    /* payload bytes after this header */
+    uint32_t reserved[2];
+} DSndHeader;
+
+/* pgrd/<interior name> or pgrd/<x>,<y> in rpg.dpak: a cell's path grid in
+ * world coordinates; edges are an adjacency list (edge_first[count + 1]). */
+#define DPGR_MAGIC 0x52475044u /* "DPGR" */
+typedef struct {
+    uint32_t magic;
+    uint16_t version;      /* 1 */
+    uint16_t count;        /* points: float x, y, z each */
+    uint32_t edge_count;   /* then uint16 edge_first[count + 1], uint16 edges[edge_count] */
+} DPgrdHeader;
 
 /* Dialogue result-script blob (inside a text block). */
 typedef struct {
@@ -934,7 +1005,7 @@ PW_STATIC_ASSERT(sizeof(DAnimHeader) == 48, danim_header);
 PW_STATIC_ASSERT(sizeof(DAnimTrack) == 16, danim_track);
 PW_STATIC_ASSERT(sizeof(DAnimGroup) == 24, danim_group);
 PW_STATIC_ASSERT(sizeof(DZoneActor) == 64, dzone_actor);
-PW_STATIC_ASSERT(sizeof(DRpgHeader) == 200, drpgheader);
+PW_STATIC_ASSERT(sizeof(DRpgHeader) == 224, drpgheader);
 PW_STATIC_ASSERT(sizeof(DRpgObject) == 80, drpgobject);
 PW_STATIC_ASSERT(sizeof(DRpgActor) == 84, drpgactor);
 PW_STATIC_ASSERT(sizeof(DRpgListItem) == 8, drpglistitem);
@@ -952,9 +1023,14 @@ PW_STATIC_ASSERT(sizeof(DRpgCond) == 12, drpgcond);
 PW_STATIC_ASSERT(sizeof(DRpgBlock) == 16, drpgblock);
 PW_STATIC_ASSERT(sizeof(DRpgSnippet) == 12, drpgsnippet);
 PW_STATIC_ASSERT(sizeof(DRpgSkill) == 32, drpgskill);
-PW_STATIC_ASSERT(sizeof(DRpgMgef) == 24, drpgmgef);
+PW_STATIC_ASSERT(sizeof(DRpgMgef) == 40, drpgmgef);
 PW_STATIC_ASSERT(sizeof(DRpgRace) == 80, drpgrace);
 PW_STATIC_ASSERT(sizeof(DRpgTravel) == 20, drpgtravel);
 PW_STATIC_ASSERT(sizeof(DRpgMarker) == 24, drpgmarker);
+PW_STATIC_ASSERT(sizeof(DRpgAiPackage) == 36, drpgaipackage);
+PW_STATIC_ASSERT(sizeof(DRpgSound) == 12, drpgsound);
+PW_STATIC_ASSERT(sizeof(DRpgSoundGen) == 12, drpgsoundgen);
+PW_STATIC_ASSERT(sizeof(DPgrdHeader) == 12, dpgrdheader);
+PW_STATIC_ASSERT(sizeof(DSndHeader) == 32, dsndheader);
 
 #endif /* PSPWIND_FMT_H */

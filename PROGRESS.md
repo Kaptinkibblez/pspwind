@@ -6,8 +6,140 @@
 | 2 | `world_demaker.py` (17×17 terrain, batched cells) + `zone.c` + fogged `sceGu` renderer (`gfx.c`) | Done |
 | 3 | `phys.c` collision, controls, doors/zone transitions, segmented-limb animation | Done |
 | 4 | `rpg_compiler.py`, MWScript VM (`vm.c`), dialogue + journal UI (`ui.c`) | Done |
-| 5 | Combat, magic, inventory/barter/loot UI, character creation, levelling (`rpg.c`) | **Done – awaiting review** |
-| 6 | AI (`ai.c`), audio mixer (`audio.c`), save/load (`save.c`), 30/60 FPS pass | Not started |
+| 5 | Combat, magic, inventory/barter/loot UI, character creation, levelling (`rpg.c`) | Done |
+| 6 | AI (`ai.c`), audio mixer (`audio.c`), save/load (`save.c`), 30/60 FPS pass | **Done – awaiting review** |
+
+## Milestone 6 — delivered
+
+### Cooker
+* `rpg_compiler.py` → **DRPG v3**: AI packages of every NPC and creature
+  (wander with idle chances, travel, escort, follow with their cells,
+  activate), SOUN and SNDG records, magic-effect sounds (with the school
+  defaults), door open/close and light loop sounds, region ambient sounds,
+  jail markers, the "x" animation key of each creature (for spawning), and
+  every PGRD path grid as a `pgrd/<cell>` entry in world coordinates.
+* `world_demaker.py` keeps each reference's owner (NPC or faction) in the
+  zone instances.
+* `sound_demaker.py` (new): `Sound/**/*.wav` → `sounds.dpak` as mono 4-bit
+  IMA ADPCM at up to 22 kHz (reads PCM 8/16/24/32, float, IMA and MS ADPCM
+  WAVs, downmixes, resamples with a box pre-filter); `Music/**` and MP3
+  voices → `music.dpak`, MP3 frames passed through for the PSP's Media
+  Engine; a `music/index` playlist. `cook_all.py` runs it.
+
+### Runtime
+* `audio.c` — software mixer, 24 voices at 44.1 kHz stereo: clips loaded
+  on demand into a 2 MB buddy-allocated cache (LRU eviction, never while
+  playing), IMA ADPCM decoded per block on the fly, 16.16 resampling with
+  interpolation, per-buffer gain ramps, positional voices with OpenMW's
+  distance rules (SOUN ranges × `fAudioMin/MaxDistanceMult`) and
+  equal-power panning, owner-bound voices that follow their actor, voice
+  stealing, loops, categories (master, effects, footsteps, voice, music).
+  Streams for music (explore/battle playlists with fades, `StreamMusic`) and
+  speech (`Say`/`SayDone`). PSP backend: a mixing thread on `sceAudio`
+  double buffers, MP3 decoded by `sceMp3`, a semaphore around the voice
+  table; the host build mixes on demand and plays MP3 as timed silence.
+* `ai.c` — per-actor AI: the record's (or a script's) package; wandering
+  over path grids (A* over the merged grid of the zone, stitched across
+  cells) or open ground, idles, greeting stops; travel, escort, follow,
+  activate with durations and `GetAIPackageDone`; movement through the
+  player's collision code with a body per actor and stuck recovery;
+  hostility by OpenMW's fight + disposition + distance rule and
+  detection (sneaking against the observer's Sneak, distance and facing);
+  combat with chasing, weapon or claw strikes, target spells from range,
+  self-healing, fleeing; summoned creatures that fight for their caster
+  and vanish when the effect ends (creature from the `sMagic…ID` GMSTs);
+  run-time spawning of creatures (`PlaceAtPC`/`PlaceAtMe`) through spare
+  zone slots, meshes and clips loaded on demand. Crime: assault, murder,
+  theft of owned items and container contents (faction goods excepted),
+  trespass add a bounty when an NPC sees it; guards pursue and force a
+  greeting; `PayFine`, `PayFineThief` (stolen goods confiscated),
+  `GoToJail` (days in jail, skills slip, released at the prison marker).
+  Script verbs: AIWander/AITravel/AIFollow(Cell)/AIEscort(Cell)/AIActivate,
+  GetAIPackageDone, GetCurrentAIPackage, StartCombat, StopCombat,
+  GetAttacked, GetTarget, GetDetected, GetLOS, PlaySound(3D)(VP),
+  PlayLoopSound3D(VP), StopSound, GetSoundPlaying, Say, SayDone,
+  StreamMusic, PayFine(Thief), GoToJail, PlaceAtPC, PlaceAtMe.
+* Sounds in play: footsteps by boots weight (and swimming), landing,
+  weapon swings and hits, spell casts by school, doors, picking up items
+  and gold, locks, the four nearest light loops, region ambience, menu
+  clicks and books, creature moans/roars/screams and their footsteps, battle
+  music while something fights the player.
+* `save.c` — eight slots (0 = quicksave): versioned files with a CRC-32,
+  a fingerprint of the cooked database and a summary for the slot list;
+  written to a temporary file and renamed; every count and index validated
+  before anything changes. Saves the VM (globals, time, script instances and
+  locals, the stat store and inventories slot-exact, journal, topics,
+  factions), the mechanics state, the player, stolen goods and every actor
+  of the current zone (including spawned creatures). Save/load screens in
+  the UI, pause-menu entries, and a death screen that loads the newest save.
+* Performance: CPU at 333 MHz; frame pacing that holds 60 Hz while a frame
+  fits into 15.8 ms and otherwise drops to a steady 30 Hz (back to 60 after
+  two seconds of headroom), selectable auto / 60 / 30; distant actors
+  re-posed every other frame (staggered); AI frozen beyond 4096 units and
+  thinking at 4 Hz staggered across actors; the debug overlay shows update,
+  UI and frame times and the pacing rate.
+* Zones keep writable copies of their instance and actor tables with 16
+  spare slots each, so spawned creatures are ordinary instances (they get
+  their own reference keys, so a spawned copy of a unique creature is a new
+  individual).
+
+![Saves](docs/img/ui_saves.png)
+
+### Test world additions
+Generated sounds (footsteps, swish, hit, door, cast, click, waves, fire,
+creature moan and roar; 8-bit 11 kHz and stereo 44 kHz sources to exercise
+conversion), a stereo explore theme and a battle loop, a silent MP3 voice,
+25 SOUN and 5 SNDG records, door / lantern / region sounds, path grids for
+the hamlet and the cellar, wander packages, a guard (class Guard) with the
+crime greeting (pay / jail / resist), an owned goblet, a hostile shore
+snapper far from the hamlet, a summon spell with `sMagicScampID`, and a
+prison marker.
+
+### Verification run
+* `make` → `EBOOT.PBP` (734 KB), zero warnings under `-Werror`; static
+  image 35.9 MB including the 32 MB arena.
+* `make test`: 102 host checks; **145 cooker tests** (adds the v3 tables:
+  AI packages, sounds and generators, path grids, prison marker; the sound
+  cooker: ADPCM round trip quality, block headers, stereo interleave, WAV
+  PCM/8-bit/IMA/MS-ADPCM input, downmix + resampling, MP3 frame parsing,
+  the packed test world and playlist; the C/Python enum contract);
+  world test; game test 40/40; rpg test 73/73; mech test 111/111;
+  **audio test 32/32** (decoder, resampling, distance falloff, silence
+  beyond range, panning and turning, loops, categories, stealing,
+  saturation, playlists with the battle fade, speech timing, cache
+  eviction under pressure); **ai test 56/56** (A* paths over grid edges,
+  the guard wandering within its radius, travel and follow packages,
+  theft seen by the owner, a guard pursuing and confronting the player,
+  paying the fine, jail with skill loss, confiscation and release at the
+  marker, assault and the victim fighting back, a summoned ally following
+  and vanishing, sneaking vs. plain detection, a hostile creature engaging
+  at the right distance and biting, battle music, spawning, light loops);
+  **save test 26/26** (round trip of position, zone, inventory stacks and
+  equipment, journal, globals, stats, effects, stolen goods, the summon and
+  actor positions; damaged, truncated, foreign and 150 fuzzed files
+  refused or loaded without crashing; a refused load changes nothing; no
+  saving while dead); **ui test 180/180** (adds saving from the slot list
+  and loading it from the death screen).
+
+### Deferred (not part of this plan)
+* Recorded dialogue voices (an INFO's sound file, and the Voice dialogue's
+  Hello / Idle / Attack / Hit lines) are not played; scripted `Say` uses
+  the speech stream.
+* Followers do not cross zone boundaries; actors outside the saved zone
+  return to their cooked places when a zone is entered again (their deaths,
+  stats and inventories persist through the VM).
+* Only creatures can be spawned at run time (NPC body assembly is cooked);
+  resting is not interrupted by wandering creatures; stolen goods are
+  tracked per item id, not per stack, and merchants do not refuse them.
+* Arrows and spells still resolve along the aim ray instantly.
+
+### Still not verified
+1. Nothing has run on a PSP or in PPSSPP: the audio thread, `sceMp3`
+   decoding, `sceIo` save files on the Memory Stick, the 333 MHz setting and
+   the frame pacing are compiled and reviewed but untested on hardware; the
+   pacing thresholds will need tuning against real frame times.
+2. Retail data: Morrowind's ~6 000 sounds, voices, path grids and AI
+   packages have not been cooked here.
 
 ## Milestone 5 — delivered
 

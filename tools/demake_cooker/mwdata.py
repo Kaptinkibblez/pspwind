@@ -306,3 +306,10 @@ SCHOOL_SKILLS = [11, 13, 10, 12, 14, 15]  # alteration conjuration destruction i
 # ids of the intervention markers placed in the world
 DIVINE_MARKER = "divinemarker"
 TEMPLE_MARKER = "templemarker"
+PRISON_MARKER = "prisonmarker"
+
+# default spell sounds per school when an MGEF names none (OpenMW's rule)
+SCHOOL_NAMES = ["alteration", "conjuration", "destruction", "illusion", "mysticism", "restoration"]
+
+# SNDG sound generator types
+SNDG_TYPES = ["left foot", "right foot", "swim left", "swim right", "moan", "roar", "scream", "land"]

@@ -100,6 +100,7 @@ class ZInstance:
     bound: Tuple[float, float, float, float]
     light: Optional["ZLight"] = None
     cell_slot: int = 0
+    owner: str = ""  # owning NPC or faction id (stealing), stored in DZoneInstance.owner
 
 
 @dataclass
@@ -197,7 +198,7 @@ def write_zone(z: Zone) -> bytes:
     for i, ins in enumerate(instances):
         w.pack(INSTANCE_FMT[1:], ins.mesh, ins.kind, ins.flags, ins.cell_slot,
                door_index.get(i, NONE16), fnv1a32(ins.object_id), ins.refnum, *ins.pos,
-               *ins.rot, ins.scale, *ins.bound, 0)
+               *ins.rot, ins.scale, *ins.bound, fnv1a32(ins.owner.lower()) if ins.owner else 0)
     doors_ofs = w.align(16)
     for i, d in doors:
         w.pack(DOOR_FMT[1:], i, d.dest_zone, *d.dest_pos, *d.dest_rot,
@@ -324,7 +325,7 @@ def read_zone(data: bytes) -> dict:
         out["instances"].append({"mesh": r[0], "kind": r[1], "flags": r[2], "cell": r[3],
                                  "door": r[4], "object_hash": r[5], "refnum": r[6],
                                  "pos": r[7:10], "rot": r[10:13], "scale": r[13],
-                                 "bound": r[14:18]})
+                                 "bound": r[14:18], "owner": r[18]})
     out["doors"] = []
     for i in range(ndoors):
         r = struct.unpack_from(DOOR_FMT, data, doors_ofs + 48 * i)

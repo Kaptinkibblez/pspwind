@@ -16,6 +16,7 @@ import dmcommon  # noqa: E402
 import dmesh  # noqa: E402
 import anim_demaker  # noqa: E402
 import dzone  # noqa: E402
+import sound_demaker  # noqa: E402
 import mwscript  # noqa: E402
 import rpg_compiler  # noqa: E402
 import tex_demaker  # noqa: E402
@@ -127,6 +128,7 @@ class LayoutContractTests(unittest.TestCase):
         **dzone.SIZES,
         **anim_demaker.SIZES,
         **rpg_compiler.SIZES,
+        **sound_demaker.SIZES,
         "DRpgSnippet": struct.calcsize(mwscript.SNIPPET_HEADER_FMT),
     }
 
@@ -179,6 +181,27 @@ class LayoutContractTests(unittest.TestCase):
             m = re.search(cname + r"\s*=\s*1 << (\d+)", text)
             self.assertIsNotNone(m, cname)
             self.assertEqual(1 << int(m.group(1)), value, cname)
+
+    def test_m6_enums_match(self):
+        import mwdata
+        with open(os.path.join(REPO, "src", "fmt.h"), encoding="utf-8") as f:
+            text = f.read()
+
+        def enum_values(first):
+            body = re.search(r"enum \{\s*" + first + r"\s*=\s*0,([^}]*)\}", text).group(1)
+            return [first] + [n.split("=")[0].strip() for n in body.replace("\n", " ").split(",") if n.strip()]
+
+        self.assertEqual(enum_values("DRPG_AI_WANDER")[:5],
+                         ["DRPG_AI_WANDER", "DRPG_AI_TRAVEL", "DRPG_AI_ESCORT", "DRPG_AI_FOLLOW", "DRPG_AI_ACTIVATE"])
+        self.assertEqual((rpg_compiler.AI_WANDER, rpg_compiler.AI_TRAVEL, rpg_compiler.AI_ESCORT,
+                          rpg_compiler.AI_FOLLOW, rpg_compiler.AI_ACTIVATE), (0, 1, 2, 3, 4))
+        self.assertEqual(len([n for n in enum_values("DRPG_SNDG_LEFT") if n != "DRPG_SNDG_COUNT"]),
+                         len(mwdata.SNDG_TYPES))
+        self.assertRegex(text, r"DRPG_MARKER_PRISON = 2")
+        self.assertRegex(text, r"DSND_CODEC_ADPCM = %d, DSND_CODEC_MP3 = %d" % (sound_demaker.CODEC_ADPCM,
+                                                                                sound_demaker.CODEC_MP3))
+        self.assertIn("0x%08Xu" % sound_demaker.DSND_MAGIC, text)
+        self.assertIn("0x%08Xu" % rpg_compiler.PGRD_MAGIC, text)
 
 
 if __name__ == "__main__":

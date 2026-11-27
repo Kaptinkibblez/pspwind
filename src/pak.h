@@ -29,6 +29,9 @@ void pak_close(Pak *p);
 const DPakEntry *pak_find(const Pak *p, uint32_t hash);
 /* Reads a whole entry into dst (entry->size bytes). Returns 0 on success. */
 int pak_read(const Pak *p, const DPakEntry *e, void *dst);
+/* Reads size bytes at ofs inside an entry (streaming). Returns 0 on success.
+ * One thread per Pak: the handle's file position is shared. */
+int pak_read_range(const Pak *p, const DPakEntry *e, uint32_t ofs, void *dst, uint32_t size);
 /* Finds + allocates (mem_try_alloc, low end) + reads. NULL if missing or the
  * region is full; *size_out receives the size when non-NULL. */
 void *pak_load(const Pak *p, uint32_t hash, MemRegionId region, uint32_t align,

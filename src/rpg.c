@@ -31,6 +31,35 @@ int rpg_gmst_i(const Rpg *r, const char *id, int fallback)
     return (int)rpgdb_gmst_int(r->db, id, fallback);
 }
 
+const char *summon_gmst(int effect)
+{
+    switch (effect) {
+    case MGEF_SUMMON_SCAMP: return "sMagicScampID";
+    case MGEF_SUMMON_SCAMP + 1: return "sMagicClannfearID";
+    case MGEF_SUMMON_SCAMP + 2: return "sMagicDaedrothID";
+    case MGEF_SUMMON_SCAMP + 3: return "sMagicDremoraID";
+    case MGEF_SUMMON_SCAMP + 4: return "sMagicAncestralGhostID";
+    case MGEF_SUMMON_SCAMP + 5: return "sMagicSkeletalMinionID";
+    case MGEF_SUMMON_SCAMP + 6: return "sMagicLeastBonewalkerID";
+    case MGEF_SUMMON_SCAMP + 7: return "sMagicGreaterBonewalkerID";
+    case MGEF_SUMMON_SCAMP + 8: return "sMagicBonelordID";
+    case MGEF_SUMMON_SCAMP + 9: return "sMagicWingedTwilightID";
+    case MGEF_SUMMON_SCAMP + 10: return "sMagicHungerID";
+    case MGEF_SUMMON_SCAMP + 11: return "sMagicGoldenSaintID";
+    case MGEF_SUMMON_SCAMP + 12: return "sMagicFlameAtronachID";
+    case MGEF_SUMMON_SCAMP + 13: return "sMagicFrostAtronachID";
+    case MGEF_SUMMON_STORM_ATRONACH: return "sMagicStormAtronachID";
+    case MGEF_SUMMON_CENTURION_SPHERE: return "sMagicCenturionSphereID";
+    case MGEF_SUMMON_FABRICANT: return "sMagicFabricantID";
+    case MGEF_SUMMON_WOLF: return "sMagicCreature01ID";
+    case MGEF_SUMMON_WOLF + 1: return "sMagicCreature02ID";
+    case MGEF_SUMMON_WOLF + 2: return "sMagicCreature03ID";
+    case MGEF_SUMMON_WOLF + 3: return "sMagicCreature04ID";
+    case MGEF_SUMMON_CREATURE05: return "sMagicCreature05ID";
+    default: return "";
+    }
+}
+
 void rpg_notify(Rpg *r, const char *gmst, const char *fallback)
 {
     vm_notify(r->vm, rpgdb_gmst_string(r->db, gmst, fallback));
@@ -970,12 +999,13 @@ int rpg_apply(Rpg *r, const VmRef *caster, const VmRef *target, const DRpgEffect
             landed++;
             continue;
         }
-        if (e->effect >= MGEF_SUMMON_SCAMP && e->effect <= MGEF_SUMMON_STORM_ATRONACH) {
-            rpg_notify(r, "", "Summoned creatures arrive with the AI milestone (M6).");
-            continue;
-        }
-        if (e->effect == MGEF_SUMMON_CENTURION_SPHERE || e->effect >= MGEF_SUMMON_FABRICANT) {
-            rpg_notify(r, "", "Summoned creatures arrive with the AI milestone (M6).");
+        if ((e->effect >= MGEF_SUMMON_SCAMP && e->effect <= MGEF_SUMMON_STORM_ATRONACH) ||
+            e->effect == MGEF_SUMMON_CENTURION_SPHERE || e->effect >= MGEF_SUMMON_FABRICANT) {
+            /* the creature id comes from a GMST (sMagicScampID ...), as in the original */
+            const char *id = rpgdb_gmst_string(r->db, summon_gmst(e->effect), "");
+            float dur = PW_MAX(1.0f, (float)e->duration);
+            if (*id && r->host.summon && r->host.summon(r->host.user, dst, pw_hash_name(id), e->effect, dur))
+                landed++;
             continue;
         }
         dur = (m->flags & DRPG_MF_NO_DURATION) ? 1.0f : PW_MAX(1.0f, (float)e->duration);

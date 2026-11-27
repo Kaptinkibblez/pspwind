@@ -37,13 +37,16 @@ src/                     PSP runtime (C99)
   rpg.c/.h               character mechanics: stats, progression, magic effects, death, rest, chargen
   rpg_items.c            stacks, equipment, casting, combat, lock picking, item use
   rpg_trade.c            barter, services (training, spells, repair, travel), persuasion, crafting
+  ai.c/.h                actor behaviour: AI packages, path grids + A*, combat, sneaking, crime, guards, spawns
+  audio.c/.h             mixer: ADPCM effect cache, 3D voices, streamed music/speech, sceAudio + sceMp3 backend
+  save.c/.h              saved games: CRC-checked slots written atomically, validated before loading
   ui.c/.h, ui_gu.c       8x8-font console UI core: dialogue + services, journal, books, message boxes
   ui_menu.c              SELECT menu tabs: Stats, Inventory, Magic, Map
   ui_trade.c             loot, barter, service, alchemy, repair, spellmaking, enchanting screens
-  ui_char.c              character creation, level up, rest/wait, death, in-game HUD
+  ui_char.c              character creation, level up, rest/wait, death, save/load slots, in-game HUD
   font8x8.h              MSX 8x8 font (PSPSDK)
   selftest.c/.h          allocator + VFPU-vs-scalar test suite (host and device)
-  main.c                 boot, PSP input, pause menu, debug overlay, frame loop
+  main.c                 boot (333 MHz), PSP input, pause menu, frame pacing, debug overlay, frame loop
 tests/host/              native build of the portable runtime code + test runner
 tools/demake_cooker/     Python 3 + Pillow offline cooker
   cook_all.py            runs the whole pipeline (meshes -> anims -> world -> rpg -> textures)
@@ -51,6 +54,7 @@ tools/demake_cooker/     Python 3 + Pillow offline cooker
   mwscript.py            MWScript compiler -> bytecode (+ disassembler)
   mwsig.py               MWScript verb signatures; gen_mwfuncs.py writes src/mwfuncs.h
   mwdata.py              engine constants: 143 magic effects + flags, resistances, skills, markers
+  sound_demaker.py       Sound/ + Music/ -> sounds.dpak (IMA ADPCM) + music.dpak (MP3 pass-through, playlists)
   tex_demaker.py         textures -> DTEX (T4/T8, swizzled) + icon atlases
   mesh_demaker.py        NIF -> DMESH (decimated, segmented skins, collision)
   anim_demaker.py        KF -> DANIM (text-key groups, 15 fps, root motion -> speed)
@@ -107,8 +111,11 @@ scripted input (walking, collision, jumping, doors, swimming, zone borders,
 NPC animation), runs the RPG layer on the cooked `rpg.dpak` (`rpg_test`:
 quest via the dialogue engine + bytecode fuzzing; `mech_test`: character
 creation, levelling, combat, magic, items, trade, services and crafting
-numbers against Morrowind's formulas) and plays the test quest plus every M5
-screen through the UI with button presses (`ui_test`, screenshots in
+numbers against Morrowind's formulas; `audio_test`: the mixer on the cooked
+sounds; `ai_test`: path finding, wandering, packages, combat, sneaking,
+crime, guards, jail and summons; `save_test`: save round trips and damaged
+or fuzzed files) and plays the test quest plus every M5/M6 screen through
+the UI with button presses (`ui_test`, screenshots in
 `build/host/screens/`). None of them needs the PSP toolchain.
 
 ## Cooking assets
@@ -126,10 +133,15 @@ Bloodmoon order, loose files overriding archives; ESMs in the same order).
 The pipeline cooks meshes, then animations, then zones (merging small statics
 and assembling NPCs from race body parts using the cooked meshes and clips),
 then the RPG database (`rpg_compiler.py`: dialogue, quests, books, factions,
-items, spells, globals, GMSTs, and every script compiled to bytecode), then
+items, spells, globals, GMSTs, AI packages, sound records, path grids, and
+every script compiled to bytecode), then the sounds (`sound_demaker.py`:
+effects to 4-bit ADPCM, music and voices kept as MP3 for the PSP's hardware
+decoder), then
 only the textures that meshes and zones reference (plus UI art, icons and
 embedded NIF textures). Copy `meshes.dpak`, `anims.dpak`, `textures.dpak`,
-`zones.dpak` and `rpg.dpak` to `ms0:/PSP/GAME/pspwind/data/`. Each step also runs on its own
+`zones.dpak`, `rpg.dpak`, `sounds.dpak` and `music.dpak` to
+`ms0:/PSP/GAME/pspwind/data/`. Saved games go to
+`ms0:/PSP/GAME/pspwind/saves/`. Each step also runs on its own
 (`mesh_demaker.py`, `world_demaker.py`, `tex_demaker.py`) with options such as
 `--ratio` (triangle budget, default 0.5), `--zone-size` (cells per zone side,
 default 3), `--merge-max-tris`, `--size`/`--small-size`, `--colors`,
@@ -174,7 +186,7 @@ looks and the face buttons walk):
 | D-pad ← | ready / sheathe the weapon |
 | D-pad → | ready / put away the selected spell, power or enchanted item |
 | SELECT | menu: L/R switch Stats, Inventory, Magic, Map, Journal |
-| START | pause menu: controls A/B, invert look, face culling, debug overlay, fly mode (debug), next animation (debug), quit |
+| START | pause menu: save game, load game, controls A/B, invert look, music / effects volume, frame rate (auto 60→30, 60, 30), face culling, debug overlay (with frame timings), fly mode (debug), next animation (debug), quit |
 
 Menu tabs: **Stats** (attributes, health/magicka/fatigue, level progress,
 skills by major/minor/misc with progress, factions; △ rest/wait),
@@ -193,6 +205,10 @@ loot: ←/→ switch side, ✕ trade one / move a stack, □ trade a stack, △ 
 all. Effect editor (spellmaking, enchanting): ↑/↓ field, ←/→ change (L/R by
 ten), ✕ remove, ○ done. On-screen keyboard: D-pad, ✕ type, □ delete, START
 done. Books: ↑/↓ scroll, □ take, ✕ close. Message boxes: ←/→ and ✕.
+
+Saves: eight slots (0 is the quicksave) with name, level, place, game date
+and play time; ✕ saves (twice to overwrite) or loads, ○ back. After death,
+✕ loads the newest save, △ picks one, □ starts again where you are.
 
 ![Character creation review](docs/img/ui_chargen_review.png)
 ![Inventory](docs/img/ui_inventory.png)

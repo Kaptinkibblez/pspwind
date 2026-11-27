@@ -38,6 +38,18 @@ import synth as S  # noqa: E402
 CELL = esm.CELL_SIZE
 EXTERIOR = [(x, y) for x in range(-3, 3) for y in range(-3, 3)]  # 6x6 cells
 CELLAR = "Test Hamlet, Cellar"
+SNAPPER_CELL = (-2, -2)
+
+
+def snapper_pos() -> Tuple[float, float]:
+    """A dry spot in the south-west corner, far from the hamlet."""
+    for r in range(0, 4000, 250):
+        for k in range(8):
+            x = -2 * CELL + 4096.0 + r * math.cos(k * math.pi / 4)
+            y = -2 * CELL + 4096.0 + r * math.sin(k * math.pi / 4)
+            if terrain_height(x, y) > 40.0:
+                return x, y
+    return -2 * CELL + 4096.0, -2 * CELL + 4096.0
 
 
 # --------------------------------------------------------------------------
@@ -428,6 +440,160 @@ PARTS = {  # BODY id -> (BYDT part, female, mesh key, rigid spec or None)
 }
 
 
+# --------------------------------------------------------------- sounds (M6)
+def _wav(samples: List[int], rate: int, channels: int = 1, bits: int = 16) -> bytes:
+    if bits == 8:
+        data = bytes(max(0, min(255, (v >> 8) + 128)) for v in samples)
+    else:
+        data = struct.pack(f"<{len(samples)}h", *samples)
+    fmt = struct.pack("<HHIIHH", 1, channels, rate, rate * channels * bits // 8, channels * bits // 8, bits)
+    body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt + b"data" + struct.pack("<I", len(data)) + data
+    return b"RIFF" + struct.pack("<I", len(body)) + body
+
+
+def _synth(seconds: float, rate: int, fn) -> List[int]:
+    n = int(seconds * rate)
+    return [max(-32768, min(32767, int(fn(i / rate, i / n)))) for i in range(n)]
+
+
+def _silent_mp3(frames: int) -> bytes:
+    """MPEG-1 layer III, 64 kbit/s, 44.1 kHz, mono frames whose side info and
+    main data are zero: a valid stream that decodes to silence."""
+    header = struct.pack(">I", 0xFFFB50C4)  # sync, MPEG-1, layer III, no CRC, 64k, 44100, mono
+    size = 144 * 64000 // 44100
+    return b"ID3" + bytes([3, 0, 0, 0, 0, 0, 0]) + (header + bytes(size - 4)) * frames
+
+
+def sound_files() -> Dict[str, bytes]:
+    rng = random.Random(77)
+    noise = [rng.uniform(-1.0, 1.0) for _ in range(44100)]
+    sine = math.sin
+    out = {
+        # footstep: short decaying noise thump
+        "sound/fx/tw/step.wav": _wav(_synth(0.12, 22050, lambda t, u: noise[int(t * 22050)] * 9000 * (1 - u) ** 3), 22050),
+        # sword swish: noise with a falling envelope, 11 kHz 8-bit (conversion path)
+        "sound/fx/tw/swish.wav": _wav(_synth(0.25, 11025, lambda t, u: noise[int(t * 11025)] * 14000 * sine(math.pi * u)),
+                                      11025, bits=8),
+        # hit: low thud, stereo 44.1 kHz (downmix + resample path)
+        "sound/fx/tw/hit.wav": _wav([v for v in _synth(0.2, 44100, lambda t, u: 16000 * sine(2 * math.pi * 90 * t) * (1 - u) ** 2)
+                                     for _ in (0, 1)], 44100, channels=2),
+        "sound/fx/tw/door.wav": _wav(_synth(0.4, 22050, lambda t, u: 9000 * sine(2 * math.pi * (180 - 80 * u) * t) * (1 - u)), 22050),
+        "sound/fx/tw/cast.wav": _wav(_synth(0.5, 22050, lambda t, u: 8000 * sine(2 * math.pi * (400 + 900 * u) * t) * (1 - u)), 22050),
+        "sound/fx/tw/click.wav": _wav(_synth(0.03, 22050, lambda t, u: 12000 * sine(2 * math.pi * 2000 * t) * (1 - u)), 22050),
+        # loops: shore waves and lantern fire
+        "sound/fx/tw/waves.wav": _wav(_synth(2.0, 22050, lambda t, u: noise[int(t * 22050) % 44100] * 3000 * (0.6 + 0.4 * sine(2 * math.pi * t * 0.5))), 22050),
+        "sound/fx/tw/fire.wav": _wav(_synth(1.0, 22050, lambda t, u: noise[int(t * 22050)] * (5000 if noise[int(t * 2205)] > 0.7 else 900)), 22050),
+        "sound/cr/tw/moan.wav": _wav(_synth(0.6, 22050, lambda t, u: 7000 * sine(2 * math.pi * (120 + 30 * sine(9 * t)) * t) * sine(math.pi * u)), 22050),
+        "sound/cr/tw/roar.wav": _wav(_synth(0.6, 22050, lambda t, u: 9000 * sine(2 * math.pi * 70 * t) * noise[int(t * 22050)] * (1 - u)), 22050),
+        # a voice line: silent MP3 frames (MP3 pass-through path)
+        "sound/vo/tw/hello.mp3": _silent_mp3(60),
+    }
+    # four-second stereo theme for the explore playlist
+    notes = [262, 330, 392, 330, 294, 349, 440, 349]
+    theme = _synth(4.0, 22050, lambda t, u: 6000 * sine(2 * math.pi * notes[int(t * 2) % 8] * t) * (0.5 + 0.5 * sine(math.pi * ((t * 2) % 1))))
+    stereo = []
+    for i, v in enumerate(theme):
+        stereo += [v, (v * 3) // 4]
+    out["music/explore/tw_theme.wav"] = _wav(stereo, 22050, channels=2)
+    out["music/battle/tw_battle.wav"] = _wav(_synth(2.0, 22050, lambda t, u: 7000 * sine(2 * math.pi * 110 * t) * (1 if (t * 4) % 1 < 0.5 else 0.3)), 22050)
+    return out
+
+
+SOUNDS = [  # SOUN id, file (relative to Sound/), volume, min, max
+    ("FootBareLeft", "Fx\\tw\\step.wav", 200, 0, 0), ("FootBareRight", "Fx\\tw\\step.wav", 200, 0, 0),
+    ("FootLightLeft", "Fx\\tw\\step.wav", 220, 0, 0), ("FootLightRight", "Fx\\tw\\step.wav", 220, 0, 0),
+    ("FootMedLeft", "Fx\\tw\\step.wav", 230, 0, 0), ("FootMedRight", "Fx\\tw\\step.wav", 230, 0, 0),
+    ("DefaultLand", "Fx\\tw\\step.wav", 255, 0, 0),
+    ("Weapon Swish", "Fx\\tw\\swish.wav", 255, 0, 0), ("Health Damage", "Fx\\tw\\hit.wav", 255, 0, 0),
+    ("Hand To Hand Hit", "Fx\\tw\\hit.wav", 255, 0, 0), ("Light Armor Hit", "Fx\\tw\\hit.wav", 255, 0, 0),
+    ("Door Wood Open", "Fx\\tw\\door.wav", 255, 0, 0), ("Door Wood Close", "Fx\\tw\\door.wav", 255, 0, 0),
+    ("destruction cast", "Fx\\tw\\cast.wav", 255, 0, 0), ("destruction hit", "Fx\\tw\\hit.wav", 255, 0, 0),
+    ("restoration cast", "Fx\\tw\\cast.wav", 255, 0, 0), ("conjuration cast", "Fx\\tw\\cast.wav", 255, 0, 0),
+    ("Menu Click", "Fx\\tw\\click.wav", 200, 0, 0), ("Item Misc Up", "Fx\\tw\\click.wav", 255, 0, 0),
+    ("Item Gold Up", "Fx\\tw\\click.wav", 255, 0, 0), ("Open Lock", "Fx\\tw\\click.wav", 255, 0, 0),
+    ("tw waves", "Fx\\tw\\waves.wav", 160, 10, 40), ("Fire", "Fx\\tw\\fire.wav", 180, 1, 10),
+    ("tw critter moan", "Cr\\tw\\moan.wav", 255, 2, 20), ("tw critter roar", "Cr\\tw\\roar.wav", 255, 2, 25),
+]
+
+
+def sound_records() -> List[bytes]:
+    recs = [esm.record("SOUN", [esm.sub("NAME", esm.zs(sid)), esm.sub("FNAM", esm.zs(fn)),
+                                esm.sub("DATA", bytes((vol, mn, mx)))]) for sid, fn, vol, mn, mx in SOUNDS]
+    for i, (gtype, snd) in enumerate(((0, "FootBareLeft"), (1, "FootBareRight"), (4, "tw critter moan"),
+                                      (5, "tw critter roar"), (6, "tw critter roar"))):
+        recs.append(esm.record("SNDG", [esm.sub("NAME", esm.zs(f"tw_critter{i:04d}")),
+                                        esm.sub("DATA", struct.pack("<i", gtype)),
+                                        esm.sub("CNAM", esm.zs("tw_critter")),
+                                        esm.sub("SNAM", esm.zs(snd))]))
+    return recs
+
+
+def ai_wander(distance: int, idles=(40, 20, 10, 0, 0, 0, 0, 0)) -> bytes:
+    return esm.sub("AI_W", struct.pack("<HHB8BB", distance, 0, 0, *idles, 1))
+
+
+def pathgrid(name: str, gx: int, gy: int, points, edges) -> bytes:
+    """points in cell-local (exterior) or interior coordinates; edges = pairs."""
+    conn = [[] for _ in points]
+    for a, b in edges:
+        conn[a].append(b)
+        conn[b].append(a)
+    pgrp = b"".join(struct.pack("<iiiBBH", int(x), int(y), int(z), 1, len(conn[i]), 0)
+                    for i, (x, y, z) in enumerate(points))
+    pgrc = b"".join(struct.pack("<I", c) for cl in conn for c in cl)
+    return esm.record("PGRD", [esm.sub("DATA", struct.pack("<iiHH", gx, gy, 128, len(points))),
+                               esm.sub("NAME", esm.zs(name)), esm.sub("PGRP", pgrp),
+                               esm.sub("PGRC", pgrc)])
+
+
+def hamlet_pathgrid(house) -> bytes:
+    pts, edges = [], []
+    for k in range(10):
+        a = 2 * math.pi * k / 10
+        x, y = house[0] + 720.0 * math.cos(a), house[1] + 720.0 * math.sin(a)
+        pts.append((x, y, terrain_height(x, y)))
+        edges.append((k, (k + 1) % 10))
+    # a spoke out to the guard post north of the house
+    x, y = house[0], house[1] + 1300.0
+    pts.append((x, y, terrain_height(x, y)))
+    edges.append((len(pts) - 1, 2))
+    edges.append((len(pts) - 1, 3))
+    return pathgrid("Test Hamlet", 0, 0, pts, edges)
+
+
+def cellar_pathgrid() -> bytes:
+    pts = [(x, y, 0.0) for y in (-300.0, 0.0, 300.0) for x in (-300.0, 0.0, 300.0)]
+    edges = []
+    for r in range(3):
+        for c in range(3):
+            i = r * 3 + c
+            if c < 2:
+                edges.append((i, i + 1))
+            if r < 2:
+                edges.append((i, i + 3))
+    return pathgrid(CELLAR, 0, 0, pts, edges)
+
+
+def m6_records() -> List[bytes]:
+    recs = sound_records()
+    recs.append(esm.record("CLAS", [esm.sub("NAME", esm.zs("Guard")), esm.sub("FNAM", esm.zs("Guard")),
+                                    esm.sub("CLDT", struct.pack("<15i", 0, 5, 0, 5, 3, 0, 4, 8, 2, 6, 7,
+                                                                1, 18, 0, 0))]))
+    recs.append(obj("MISC", "tw_goblet", "tw\\crate.nif", "Silver Goblet",
+                    extra=[esm.sub("MCDT", struct.pack("<fii", 1.0, 60, 0))]))
+    recs.append(spell_record("tw_summon", "Call Critter", 0, 10, 1, [effect(102, dur=20)]))
+    recs.append(esm.record("GMST", [esm.sub("NAME", esm.zs("sMagicScampID")), esm.sub("STRV", b"tw_critter")]))
+    recs.append(esm.record("CREA", [esm.sub("NAME", esm.zs("tw_snapper")),
+                                    esm.sub("MODL", esm.zs("tw\\critter.nif")),
+                                    esm.sub("FNAM", esm.zs("Shore Snapper")),
+                                    esm.sub("NPDT", struct.pack("<24i", 0, 3, 40, 20, 20, 40, 40, 40, 20, 30,
+                                                                40, 0, 50, 25, 60, 0, 30, 3, 8, 3, 8, 3, 8, 0)),
+                                    esm.sub("FLAG", struct.pack("<i", 0x8)),
+                                    esm.sub("AIDT", bytes([0, 0, 100, 20, 0, 0, 0, 0]) + struct.pack("<I", 0)),
+                                    ai_wander(300)]))
+    return recs
+
+
 def actor_files() -> Dict[str, bytes]:
     files = {"meshes/base_anim.nif": mesh_skeleton(),
              "meshes/xbase_anim.kf": anim_xbase(),
@@ -515,8 +681,10 @@ def obj(rtype: str, oid: str, model: str, name: str = "", extra=()) -> bytes:
 
 
 def ref_subs(index: int, oid: str, pos, rot=(0.0, 0.0, 0.0), scale=None, door=None,
-             dest_cell=None) -> List[bytes]:
+             dest_cell=None, owner=None) -> List[bytes]:
     subs = [esm.sub("FRMR", struct.pack("<I", index)), esm.sub("NAME", esm.zs(oid))]
+    if owner:
+        subs.append(esm.sub("ANAM", esm.zs(owner)))
     if scale is not None:
         subs.append(esm.sub("XSCL", struct.pack("<f", scale)))
     if door is not None:
@@ -613,7 +781,7 @@ PLAYER_ITEMS = [("Gold_001", 100), ("tw_dagger", 1), ("tw_hammer", 1), ("tw_mort
                 ("tw_scroll", 1), ("tw_skillbook", 1), ("tw_cuirass", 1), ("tw_boots", 1), ("tw_shield", 1)]
 
 # magic effects used by the test content: index -> (school, base cost)
-TEST_MGEFS = {3: (0, 2.0), 7: (0, 1.0), 8: (0, 1.0), 9: (0, 3.0), 13: (0, 6.0), 14: (2, 5.0),
+TEST_MGEFS = {102: (1, 10.0), 3: (0, 2.0), 7: (0, 1.0), 8: (0, 1.0), 9: (0, 3.0), 13: (0, 6.0), 14: (2, 5.0),
               16: (2, 5.0), 18: (2, 4.0), 23: (2, 8.0), 27: (2, 9.0), 39: (3, 40.0), 41: (3, 0.3),
               44: (3, 5.0), 45: (3, 40.0), 57: (4, 5.0), 58: (4, 2.0), 60: (4, 18.0), 61: (4, 18.0),
               62: (4, 15.0), 72: (5, 15.0), 75: (5, 5.0), 77: (5, 1.0), 79: (5, 1.0), 83: (5, 1.0),
@@ -711,6 +879,7 @@ def rules_records() -> List[bytes]:
                             esm.sub("ENDT", struct.pack("<iiii", 0, 5, 5, 0)),
                             esm.sub("ENAM", effect(14, rng=2, dur=1, mn=10, mx=10))]),
         esm.record("STAT", [esm.sub("NAME", esm.zs("divinemarker"))]),
+        esm.record("STAT", [esm.sub("NAME", esm.zs("prisonmarker"))]),
     ]
     return recs
 
@@ -774,14 +943,25 @@ def rpg_records() -> List[bytes]:
                       for i, n in PLAYER_ITEMS]),
     ]
     recs += rules_records()
+    G = "tw_guard"
     recs.append(dial("Greeting 0", 2))
     recs += infos("Greeting 0", [
+        # a guard confronting a criminal: the choice answers come first
+        {"actor": G, "selects": [("01500", 1)], "text": "Good. Stay out of trouble.",
+         "script": "PayFine\nGoodbye"},
+        {"actor": G, "selects": [("01500", 2)], "text": "Come with me, then.", "script": "GoToJail"},
+        {"actor": G, "selects": [("01500", 3)], "text": "Then pay with your blood!",
+         "script": "StartCombat player\nGoodbye"},
+        {"actor": G, "selects": [("01433", 1)],
+         "text": "Stop right there! You have committed crimes against the hamlet. Pay your fine or go to jail.",
+         "script": "Choice \"Pay the fine\" 1 \"Go to jail\" 2 \"Resist arrest\" 3"},
         {"actor": W, "text": "Oh! A stranger. I'm the hamlet weaver. Have you heard about my lost ring?",
          "selects": [("03sX0metpc", 0)], "script": "set metpc to 1\nAddTopic \"lost ring\""},
     ])
     recs.append(dial("Greeting 1", 2))
     recs += infos("Greeting 1", [
         {"actor": E, "text": "Welcome to the hamlet, %PCName. Ask me about the latest rumors."},
+        {"actor": G, "text": "Keep the peace, citizen."},
         {"actor": W, "text": "Hello again, %PCName. The %Class of the %Faction greets you."},
     ])
     recs.append(dial("latest rumors", 0))
@@ -850,7 +1030,8 @@ def build_esm() -> List[bytes]:
                             esm.sub("DATA", esm.zs("tx_tw_rock.tga"))]),
         esm.record("REGN", [esm.sub("NAME", esm.zs("tw region")),
                             esm.sub("FNAM", esm.zs("Test Coast Region")),
-                            esm.sub("CNAM", struct.pack("<I", 0x00406080))]),
+                            esm.sub("CNAM", struct.pack("<I", 0x00406080)),
+                            esm.sub("SNAM", esm.zs("tw waves").ljust(32, b"\0") + bytes([30]))]),
         obj("STAT", "tw_house", "tw\\house.nif"),
         obj("STAT", "tw_rock", "tw\\rock.nif"),
         obj("STAT", "tw_tree", "tw\\tree.nif"),
@@ -859,9 +1040,11 @@ def build_esm() -> List[bytes]:
             extra=[esm.sub("CNDT", struct.pack("<f", 100.0)), esm.sub("FLAG", struct.pack("<i", 8)),
                    esm.sub("CNTO", struct.pack("<i", 2) + esm.zs("tw_potion_heal").ljust(32, b"\0")),
                    esm.sub("CNTO", struct.pack("<i", 15) + esm.zs("Gold_001").ljust(32, b"\0"))]),
-        obj("DOOR", "tw_door", "tw\\door.nif", "Door"),
+        obj("DOOR", "tw_door", "tw\\door.nif", "Door",
+            extra=[esm.sub("SNAM", esm.zs("Door Wood Open")), esm.sub("ANAM", esm.zs("Door Wood Close"))]),
         obj("LIGH", "tw_lantern", "tw\\lantern.nif", "Lantern",
-            extra=[esm.sub("LHDT", struct.pack("<fiiIII", 1.0, 5, -1, 384, 0x0060C0FF, 0x0008))]),
+            extra=[esm.sub("LHDT", struct.pack("<fiiIII", 1.0, 5, -1, 384, 0x0060C0FF, 0x0008)),
+                   esm.sub("SNAM", esm.zs("Fire"))]),
         obj("MISC", "tw_coin", "tw\\crate.nif", "Coin"),
         race_record("tw_folk", "Folk", [(5, 10), (19, 5)], [40, 40, 40, 40, 40, 40, 40, 40], 1,
                     ["tw_power"]),
@@ -884,13 +1067,18 @@ def build_esm() -> List[bytes]:
             ("tw_villager", "Hamlet Elder", False, "tw_elder", "", 50, "",
              0x1 | 0x2 | 0x800 | 0x4000 | 0x8000 | 0x10000 | 0x20000, 300),
             ("tw_villager_f", "Hamlet Weaver", True, "tw_weaver", "tw_weavers", 40, "tw_weaver_script",
-             0x4 | 0x10 | 0x100 | 0x400 | 0x2000, 200)):
+             0x4 | 0x10 | 0x100 | 0x400 | 0x2000, 200),
+            ("tw_guard", "Hamlet Guard", False, "Guard", "", 50, "", 0, 0)):
         subs = [esm.sub("NAME", esm.zs(nid)), esm.sub("FNAM", esm.zs(name)),
                 esm.sub("RNAM", esm.zs("tw_folk")), esm.sub("CNAM", esm.zs(cls)),
                 esm.sub("BNAM", esm.zs("tw_folk_head")),
                 esm.sub("NPDT", struct.pack("<hBBbxxxi", 3, disp, 5, 2 if fac else 0, gold)),
                 esm.sub("FLAG", struct.pack("<i", (1 if female else 0) | 0x10)),
-                esm.sub("AIDT", bytes([30, 0, 20, 30, 0, 0, 0, 0]) + struct.pack("<I", services))]
+                esm.sub("AIDT", bytes([30, 0, 20 if nid != "tw_guard" else 30, 30,
+                                       100 if nid == "tw_guard" else 0, 0, 0, 0]) + struct.pack("<I", services)),
+                ai_wander(500 if nid == "tw_guard" else 0)]
+        if nid == "tw_guard":
+            subs.append(esm.sub("NPCO", struct.pack("<i", 1) + esm.zs("tw_sword").ljust(32, b"\0")))
         if nid == "tw_villager":
             for sp in ("tw_spark", "tw_heal", "tw_bolt"):
                 subs.append(esm.sub("NPCS", sp.encode("latin-1").ljust(32, b"\0")))
@@ -903,6 +1091,7 @@ def build_esm() -> List[bytes]:
         subs.append(esm.sub("NPCO", struct.pack("<i", 2) + esm.zs("tw_coin").ljust(32, b"\0")))
         recs.append(esm.record("NPC_", subs))
     recs += rpg_records()
+    recs += m6_records()
     house_pos = (1200.0, 900.0, terrain_height(1200.0, 900.0))
     door_out = (house_pos[0], house_pos[1] - 206.0, house_pos[2])  # door sits at wall y - 6
     index = 1
@@ -939,8 +1128,22 @@ def build_esm() -> List[bytes]:
                 px, py = house_pos[0] + dx, house_pos[1] - 520.0
                 subs += ref_subs(index, nid, (px, py, terrain_height(px, py)), (0.0, 0.0, math.pi))
                 index += 1
+            # M6: the elder's goblet (stealing), the guard north of the house
+            gx, gy = house_pos[0] + 420.0, house_pos[1] - 560.0
+            subs += ref_subs(index, "tw_goblet", (gx, gy, terrain_height(gx, gy)), scale=0.2,
+                             owner="tw_villager")
+            index += 1
+            gx, gy = house_pos[0], house_pos[1] + 1300.0
+            subs += ref_subs(index, "tw_guard", (gx, gy, terrain_height(gx, gy)), (0.0, 0.0, math.pi))
+            index += 1
+        if (cx, cy) == SNAPPER_CELL:
+            sx, sy = snapper_pos()
+            subs += ref_subs(index, "tw_snapper", (sx, sy, terrain_height(sx, sy)))
+            index += 1
         recs.append(esm.record("CELL", subs))
         recs.append(land_record(cx, cy))
+        if (cx, cy) == (0, 0):
+            recs.append(hamlet_pathgrid(house_pos))
     cellar = [esm.sub("NAME", esm.zs(CELLAR)),
               esm.sub("DATA", struct.pack("<iii", esm.CELL_INTERIOR | esm.CELL_HAS_WATER, 0, 0)),
               esm.sub("WHGT", struct.pack("<f", -150.0)),
@@ -963,7 +1166,10 @@ def build_esm() -> List[bytes]:
     index += 1
     cellar += ref_subs(index, "tw_book_history", (-300.0, -250.0, 0.0), (0.0, 0.0, 0.0), scale=0.3)
     index += 1
+    cellar += ref_subs(index, "prisonmarker", (0.0, 250.0, 0.0))
+    index += 1
     recs.append(esm.record("CELL", cellar))
+    recs.append(cellar_pathgrid())
     return recs
 
 
@@ -974,6 +1180,7 @@ def make(out_dir: str) -> str:
     files.update(textures())
     files.update(meshes())
     files.update(actor_files())
+    files.update(sound_files())
     dmcommon.write_bsa(os.path.join(data_dir, "TestWorld.bsa"), files)
     esm.write_esm(os.path.join(data_dir, "TestWorld.esm"), build_esm())
     return data_dir

@@ -85,6 +85,9 @@ typedef struct {
     void (*killed)(void *user, const VmRef *ref);
     /* hostile living actors within radius of the player (rest check) */
     int (*hostiles_near)(void *user, float radius);
+    /* summon effects: places the creature next to the caster for duration
+     * seconds (it fights for the caster); returns 1 when it appeared */
+    int (*summon)(void *user, const VmRef *caster, uint32_t creature, int effect, float duration);
     void *user;
 } RpgHost;
 

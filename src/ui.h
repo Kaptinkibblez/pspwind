@@ -25,6 +25,7 @@
 
 #include "common.h"
 #include "game.h"
+#include "save.h"
 
 #define UI_SCREEN_W 480
 #define UI_SCREEN_H 272
@@ -63,7 +64,7 @@ void ui_render_gu(const UiCanvas *c);
 
 /* ------------------------------------------------------------------ state */
 enum { UI_NONE = 0, UI_DIALOGUE, UI_MENU, UI_BOOK, UI_LOOT, UI_BARTER, UI_SERVICE, UI_ALCHEMY,
-       UI_REPAIR, UI_SPELLMAKING, UI_ENCHANT, UI_CHARGEN, UI_LEVELUP, UI_REST, UI_DEATH };
+       UI_REPAIR, UI_SPELLMAKING, UI_ENCHANT, UI_CHARGEN, UI_LEVELUP, UI_REST, UI_DEATH, UI_SAVELOAD };
 /* SELECT menu tabs */
 enum { UI_TAB_STATS = 0, UI_TAB_INVENTORY, UI_TAB_MAGIC, UI_TAB_MAP, UI_TAB_JOURNAL, UI_TAB_COUNT };
 /* journal pages (triangle cycles) */
@@ -174,12 +175,22 @@ typedef struct {
     int rest_sleep;
     /* map panning (cells from the centre) */
     int map_dx, map_dy;
+    /* saved games */
+    const char *save_dir;      /* NULL: saving unavailable */
+    float *playtime;           /* seconds played (owned by the caller) */
+    int save_mode;             /* 1 save, 0 load */
+    SaveSlotInfo slots[SAVE_SLOTS];
+    int confirm;               /* overwrite / load confirmation pending */
     /* status line inside screens */
     char status[96];
     float status_time;
 } Ui;
 
 void ui_init(Ui *ui, Game *g);
+/* where saves live and the play-time counter they record */
+void ui_set_saves(Ui *ui, const char *dir, float *playtime);
+/* opens the slot list for saving (1) or loading (0) */
+void ui_open_saves(Ui *ui, int saving);
 /* 1 while a window or modal message captures the input */
 int ui_active(const Ui *ui);
 void ui_update(Ui *ui, const InputState *in, float dt);

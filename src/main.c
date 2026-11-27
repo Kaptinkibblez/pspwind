@@ -19,6 +19,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <psppower.h>
+
+#include "audio.h"
 #include "fmt.h"
 #include "game.h"
 #include "gfx.h"
@@ -125,8 +128,9 @@ static int run_selftests(void)
 /* ------------------------------------------------------------------------ */
 /* app state                                                                */
 /* ------------------------------------------------------------------------ */
-enum { MENU_RESUME, MENU_SCHEME, MENU_INVERT, MENU_CULL, MENU_OVERLAY, MENU_FLY, MENU_ANIM, MENU_QUIT,
-       MENU_COUNT };
+enum { MENU_RESUME, MENU_SAVE, MENU_LOAD, MENU_SCHEME, MENU_INVERT, MENU_MUSIC, MENU_EFFECTS, MENU_FRAMES,
+       MENU_CULL, MENU_OVERLAY, MENU_FLY, MENU_ANIM, MENU_QUIT, MENU_COUNT };
+enum { FRAMES_AUTO = 0, FRAMES_60, FRAMES_30 };
 
 typedef struct {
     World world;
@@ -142,6 +146,15 @@ typedef struct {
     int selftest_ok;
     float fps;
     char error[120];
+    /* Milestone 6 */
+    Audio audio;
+    int audio_ok;
+    float playtime;
+    char save_dir[180];
+    int frame_mode;          /* FRAMES_* */
+    float work_ema;          /* smoothed CPU + GPU microseconds per frame */
+    float fast_time;         /* seconds the frame has fit into 60 Hz again */
+    uint32_t t_update, t_ui; /* microseconds spent in game / UI update */
 } App;
 
 static App g_app;
@@ -183,11 +196,18 @@ static void hud(void *user)
                              (unsigned)(texcache_bytes_used(&a->world.tex) >> 10),
                              (unsigned)g->phys.tri_count, cull_names[a->opt.cull_mode],
                              a->selftest_ok ? "" : " SELFTEST FAIL");
+        pspDebugScreenSetXY(0, 4);
+        pspDebugScreenPrintf("ms upd %4.1f ui %4.1f frame %4.1f %d Hz  ai %u sfx %u",
+                             (double)a->t_update * 1e-3, (double)a->t_ui * 1e-3, (double)a->work_ema * 1e-3,
+                             60 / gfx_frame_interval(), (unsigned)g->ai.combat,
+                             (unsigned)(a->audio_ok ? a->audio.loads : 0));
     }
     if (a->paused) {
-        static const char *items[MENU_COUNT] = { "Resume", "Controls", "Invert look", "Face culling",
-                                                 "Debug overlay", "Fly (debug)", "Next animation",
-                                                 "Quit" };
+        static const char *items[MENU_COUNT] = { "Resume", "Save game", "Load game", "Controls",
+                                                 "Invert look", "Music volume", "Effects volume", "Frame rate",
+                                                 "Face culling", "Debug overlay", "Fly (debug)",
+                                                 "Next animation", "Quit" };
+        static const char *frame_names[3] = { "auto (60/30)", "60", "30" };
         int i;
         pspDebugScreenSetTextColor(0xFFFFFFFF);
         pspDebugScreenSetXY(26, 9);
@@ -205,6 +225,12 @@ static void hud(void *user)
                 snprintf(value, sizeof(value), "%s", a->overlay ? "on" : "off");
             else if (i == MENU_FLY)
                 snprintf(value, sizeof(value), "%s", g->flying ? "on" : "off");
+            else if (i == MENU_MUSIC && a->audio_ok)
+                snprintf(value, sizeof(value), "%d%%", (int)(a->audio.volume[AUDIO_CAT_MUSIC] * 100.0f + 0.5f));
+            else if (i == MENU_EFFECTS && a->audio_ok)
+                snprintf(value, sizeof(value), "%d%%", (int)(a->audio.volume[AUDIO_CAT_EFFECTS] * 100.0f + 0.5f));
+            else if (i == MENU_FRAMES)
+                snprintf(value, sizeof(value), "%s", frame_names[a->frame_mode]);
             pspDebugScreenSetTextColor(i == a->menu ? 0xFF40E0FF : 0xFFB0B0B0);
             pspDebugScreenSetXY(20, 11 + i);
             pspDebugScreenPrintf("%c %-14s %s", i == a->menu ? '>' : ' ', items[i], value);
@@ -271,6 +297,33 @@ static int pause_menu(App *a, const InputState *in)
         case MENU_RESUME:
             a->paused = 0;
             break;
+        case MENU_SAVE:
+        case MENU_LOAD:
+            if (g->rpg) {
+                a->paused = 0;
+                ui_open_saves(&a->ui, a->menu == MENU_SAVE);
+            }
+            break;
+        case MENU_MUSIC:
+        case MENU_EFFECTS:
+            if (a->audio_ok) {
+                int cat = a->menu == MENU_MUSIC ? AUDIO_CAT_MUSIC : AUDIO_CAT_EFFECTS;
+                float v = a->audio.volume[cat] + ((in->pressed & GB_LEFT) ? -0.25f : 0.25f);
+                if (v > 1.001f)
+                    v = 0.0f;
+                if (v < -0.001f)
+                    v = 1.0f;
+                audio_set_volume(&a->audio, cat, v);
+                if (cat == AUDIO_CAT_EFFECTS) {
+                    audio_set_volume(&a->audio, AUDIO_CAT_FOOTSTEPS, v * 0.6f);
+                    audio_set_volume(&a->audio, AUDIO_CAT_VOICE, v);
+                }
+            }
+            break;
+        case MENU_FRAMES:
+            a->frame_mode = (a->frame_mode + ((in->pressed & GB_LEFT) ? 2 : 1)) % 3;
+            gfx_set_frame_interval(a->frame_mode == FRAMES_30 ? 2 : 1);
+            break;
         case MENU_SCHEME:
             g->controls.scheme = g->controls.scheme == CONTROL_SCHEME_A ? CONTROL_SCHEME_B
                                                                          : CONTROL_SCHEME_A;
@@ -299,6 +352,34 @@ static int pause_menu(App *a, const InputState *in)
     if (in->pressed & (GB_START | GB_CIRCLE))
         a->paused = 0;
     return 0;
+}
+
+/* <game folder>/saves next to <game folder>/data */
+static void save_dir_from_data(char *out, size_t n, const char *data_dir)
+{
+    const char *slash = strrchr(data_dir, '/');
+    if (slash)
+        snprintf(out, n, "%.*s/saves", (int)(slash - data_dir), data_dir);
+    else
+        snprintf(out, n, "saves");
+}
+
+/* automatic frame pacing: drop to a steady 30 Hz when frames do not fit
+ * into one 60 Hz refresh, climb back after two seconds of headroom */
+static void pace_frames(App *a, float dt)
+{
+    float work = (float)gfx_last_work_us();
+    a->work_ema = a->work_ema <= 0.0f ? work : a->work_ema * 0.9f + work * 0.1f;
+    if (a->frame_mode != FRAMES_AUTO)
+        return;
+    if (gfx_frame_interval() == 1 && a->work_ema > 15800.0f) {
+        gfx_set_frame_interval(2);
+        a->fast_time = 0.0f;
+    } else if (gfx_frame_interval() == 2) {
+        a->fast_time = a->work_ema < 12500.0f ? a->fast_time + dt : 0.0f;
+        if (a->fast_time > 2.0f)
+            gfx_set_frame_interval(1);
+    }
 }
 
 static void data_dir_from_argv(char *out, size_t n, int argc, char **argv)
@@ -340,7 +421,14 @@ static void run(App *a, const char *data_dir)
     game_init(&a->game, &a->world);
     if (game_attach_rpg(&a->game, &a->rpg, data_dir, err, sizeof(err)) != 0)
         snprintf(a->error, sizeof(a->error), "no RPG data (%.80s)", err);
+    if (audio_init(&a->audio, data_dir, a->game.rpg ? &a->rpg.db : NULL, err, sizeof(err)) == 0 &&
+        audio_start(&a->audio) == 0) {
+        a->audio_ok = 1;
+        a->game.audio = &a->audio;
+    }
     ui_init(&a->ui, &a->game);
+    save_dir_from_data(a->save_dir, sizeof(a->save_dir), data_dir);
+    ui_set_saves(&a->ui, a->save_dir, &a->playtime);
     zi = world_find_exterior(&a->world, -2, -9); /* Seyda Neen with retail data */
     if (zi < 0)
         zi = world_find_exterior(&a->world, 0, 0);
@@ -383,9 +471,14 @@ static void run(App *a, const char *data_dir)
         } else if (a->game.zone.hdr) {
             InputState none;
             memset(&none, 0, sizeof(none));
+            uint64_t t0 = clock_us(), t1;
             /* open windows own the input; the world pauses but scripts run */
             game_update(&a->game, ui_active(&a->ui) ? &none : &in, dt);
+            t1 = clock_us();
             ui_update(&a->ui, &in, dt);
+            a->t_update = (uint32_t)(t1 - t0);
+            a->t_ui = (uint32_t)(clock_us() - t1);
+            a->playtime += dt;
             if (a->game.request.pending) {
                 ZoneRequest r = a->game.request;
                 enter_zone(a, r.zone, r.has_pos ? r.pos : NULL, r.has_pos ? r.rot : NULL);
@@ -401,6 +494,7 @@ static void run(App *a, const char *data_dir)
         ui_draw(&a->ui, &a->canvas);
         ui_render_gu(&a->canvas);
         gfx_end_frame(hud, a);
+        pace_frames(a, dt);
 
         frames++;
         if (now - fps_t0 >= 1000000u) {
@@ -409,6 +503,8 @@ static void run(App *a, const char *data_dir)
             fps_t0 = now;
         }
     }
+    if (a->audio_ok)
+        audio_shutdown(&a->audio);
     gfx_shutdown();
     world_close(&a->world);
 }
@@ -417,6 +513,9 @@ int main(int argc, char **argv)
 {
     char data_dir[160];
     setup_callbacks();
+    /* full speed: 333 MHz CPU, 166 MHz bus (the game is CPU bound on AI,
+     * skinning and display-list building) */
+    scePowerSetClockFrequency(333, 333, 166);
     pspDebugScreenInit();
     sceCtrlSetSamplingCycle(0);
     sceCtrlSetSamplingMode(PSP_CTRL_MODE_ANALOG);

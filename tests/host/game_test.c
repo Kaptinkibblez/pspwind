@@ -110,7 +110,7 @@ int main(int argc, char **argv)
     CHECK(g->body.on_ground && fabsf(g->body.pos.z - terrain_at(g)) < 2.0f,
           "player rests on the terrain (z %.1f, ground %.1f)", g->body.pos.z, terrain_at(g));
     CHECK(g->phys.tri_count > 0, "static collision built (%u tris)", (unsigned)g->phys.tri_count);
-    CHECK(g->actors.count == 2, "two villagers in the hamlet (%u)", (unsigned)g->actors.count);
+    CHECK(g->actors.count == 3, "elder, weaver and guard in the hamlet (%u)", (unsigned)g->actors.count);
 
     /* ---- walking north into the door: the door blocks, R takes us inside */
     x0 = g->body.pos.x;

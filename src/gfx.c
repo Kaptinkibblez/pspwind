@@ -98,8 +98,29 @@ void gfx_default_options(GfxOptions *o)
     o->near_radius = 1400.0f;
 }
 
+/* frame pacing: present every g_interval vblanks (1 = 60 Hz, 2 = 30 Hz) */
+static int g_interval = 1;
+static unsigned int g_last_vcount;
+static uint32_t g_frame_start_us, g_work_us;
+
+void gfx_set_frame_interval(int vblanks)
+{
+    g_interval = PW_CLAMP(vblanks, 1, 4);
+}
+
+int gfx_frame_interval(void)
+{
+    return g_interval;
+}
+
+uint32_t gfx_last_work_us(void)
+{
+    return g_work_us;
+}
+
 void gfx_begin_frame(uint32_t clear_abgr)
 {
+    g_frame_start_us = sceKernelGetSystemTimeLow();
     sceGuStart(GU_DIRECT, g_list);
     sceGuClearColor(clear_abgr);
     sceGuClearDepth(0);
@@ -115,13 +136,21 @@ void gfx_begin_frame(uint32_t clear_abgr)
 
 void gfx_end_frame(void (*overlay)(void *user), void *user)
 {
+    unsigned int target;
     sceGuFinish();
     sceGuSync(GU_SYNC_FINISH, GU_SYNC_WAIT);
+    /* CPU submission + GPU drawing, from begin_frame to the finished list */
+    g_work_us = sceKernelGetSystemTimeLow() - g_frame_start_us;
     if (overlay) {
         pspDebugScreenSetBase((u32 *)(0x44000000u | (uintptr_t)g_draw_rel));
         overlay(user);
     }
-    sceDisplayWaitVblankStart();
+    /* hold each frame for g_interval refreshes: a steady 30 beats a 60/30 stutter */
+    target = g_last_vcount + (unsigned int)g_interval;
+    do {
+        sceDisplayWaitVblankStart();
+    } while ((int)(sceDisplayGetVcount() - target) < 0);
+    g_last_vcount = sceDisplayGetVcount();
     g_draw_rel = sceGuSwapBuffers();
 }
 

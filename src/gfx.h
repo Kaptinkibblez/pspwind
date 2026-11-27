@@ -66,6 +66,11 @@ void gfx_draw_zone(const Zone *z, const ActorSet *actors, const Camera *cam,
 /* Finishes the display list, waits for the GE, lets the caller draw debug
  * text into the finished frame (overlay may be NULL) and flips at vblank. */
 void gfx_end_frame(void (*overlay)(void *user), void *user);
+/* frame pacing: present every n vblanks (1 = 60 Hz, 2 = 30 Hz) */
+void gfx_set_frame_interval(int vblanks);
+int gfx_frame_interval(void);
+/* microseconds from gfx_begin_frame to the GPU finishing the last frame */
+uint32_t gfx_last_work_us(void);
 /* Full-screen loading card drawn immediately (used during zone loads). */
 void gfx_loading_screen(const char *title, const char *subtitle, uint32_t bg_abgr);
 

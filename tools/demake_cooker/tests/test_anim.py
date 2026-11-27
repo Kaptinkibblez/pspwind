@@ -111,11 +111,11 @@ class ActorWorldTests(unittest.TestCase):
 
     def test_npc_assembly(self):
         z = dzone.read_zone(self.zones.get("zone/ext_0_0"))
-        self.assertEqual(len(z["actors"]), 2)
+        self.assertEqual(len(z["actors"]), 3)  # elder, weaver, guard
         names = [self.meshes.find_hash(h) for h in z["meshes"]]
-        self.assertEqual([names[a["skeleton"]] for a in z["actors"]], ["base_anim", "base_anim"])
+        self.assertEqual([names[a["skeleton"]] for a in z["actors"]], ["base_anim"] * 3)
         self.assertEqual(self.anims.find_hash(z["anims"][0]), "xbase_anim")
-        male, female = sorted(z["actors"], key=lambda a: a["flags"])
+        male, _guard, female = sorted(z["actors"], key=lambda a: a["flags"])
         self.assertEqual(female["flags"], dzone.ACTOR_F_FEMALE)
         chest = lambda a: [names[m] for m, b, _ in a["parts"] if b == 0]
         self.assertEqual(chest(male), ["tw/b_folk_chest"])

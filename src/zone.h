@@ -62,7 +62,23 @@ typedef struct {
     uint32_t mesh_bytes;
     uint32_t missing_meshes;
     uint32_t missing_anims;
+    /* runtime additions (spawned creatures): writable copies of the cooked
+     * instance and actor tables with spare slots, extra meshes and clips */
+    uint32_t instance_count;   /* placed + spawned instances */
+    uint32_t actor_rec_count;  /* cooked + spawned actor records */
+    uint32_t mesh_count;       /* loaded meshes incl. on-demand ones */
+    uint32_t anim_count;
+    uint32_t *extra_hashes;    /* mesh hashes of the on-demand meshes */
+    uint32_t *extra_anim_hashes;
+    DZoneInstance *inst_rw;
+    DZoneActor *actor_rw;
+    uint32_t spawn_serial;
 } Zone;
+
+#define ZONE_SPAWN_SLOTS 16u
+#define ZONE_EXTRA_MESHES 8u
+#define ZONE_EXTRA_ANIMS 8u
+#define ZONE_SPAWN_REFNUM 0xFE000000u  /* refnum | serial of spawned references */
 
 typedef struct {
     Pak zones, meshes, textures;
@@ -86,6 +102,15 @@ int world_find_exterior(const World *w, int cx, int cy); /* zone index or -1 */
 int world_find_interior(const World *w, uint32_t name_hash);
 
 int zone_load(World *w, Zone *z, uint32_t zi, char *err, uint32_t errlen);
+/* Mesh / clip index by pack hash, loading it into a spare slot when the
+ * zone does not have it yet. -1 (mesh) or DZONE_NONE (anim) when missing. */
+int zone_mesh_index(World *w, Zone *z, uint32_t hash);
+uint32_t zone_anim_index(World *w, Zone *z, uint32_t hash);
+/* Places a creature (skeleton mesh + clip by hash) as a new instance with
+ * its own actor record; returns the instance or -1 (no slot / no mesh).
+ * *rec_out receives the actor record index. */
+int zone_spawn_creature(World *w, Zone *z, uint32_t object_hash, uint32_t skel_hash, uint32_t anim_hash,
+                        const float pos[3], float yaw, float scale, uint32_t *rec_out);
 /* Ground height under (x, y) from the terrain patches (same triangulation as
  * the renderer). Returns 0 when no patch covers the point. */
 int zone_terrain_height(const Zone *z, float x, float y, float *h);

@@ -12,14 +12,14 @@
 TARGET    = pspwind
 OBJS      = src/main.o src/mem.o src/vfpu.o src/selftest.o src/pak.o src/texcache.o \
             src/zone.o src/gfx.o src/anim.o src/actor.o src/phys.o src/game.o src/inflate.o src/mwfuncs.o src/rpgdb.o src/vm.o src/dialogue.o \
-            src/rpg.o src/rpg_items.o src/rpg_trade.o src/ui.o src/ui_menu.o src/ui_trade.o src/ui_char.o src/ui_gu.o
+            src/rpg.o src/rpg_items.o src/rpg_trade.o src/ai.o src/audio.o src/save.o src/ui.o src/ui_menu.o src/ui_trade.o src/ui_char.o src/ui_gu.o
 
 INCDIR    = src
 CFLAGS    = -std=c99 -O2 -G0 -Wall -Wextra -Werror -fno-strict-aliasing
 ASFLAGS   = $(CFLAGS)
 LIBDIR    =
 LDFLAGS   =
-LIBS      = -lpspgu -lm
+LIBS      = -lpspgu -lpspaudio -lpspmp3 -lpsputility -lpsppower -lm
 
 BUILD_PRX = 1
 PSP_FW_VERSION = 661

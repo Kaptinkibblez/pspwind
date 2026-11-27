@@ -304,7 +304,7 @@ static void travel_info(Ui *ui, int index, char *name, uint32_t cap, int *price)
     const DRpgTravel *t = o ? &r->db->travel[o->stat[1] + index] : NULL;
     float npc_pos[3] = { g->body.pos.x, g->body.pos.y, g->body.pos.z };
     int zi = -1;
-    if (ui->npc.inst >= 0 && g->zone.hdr && (uint32_t)ui->npc.inst < g->zone.hdr->instance_count)
+    if (ui->npc.inst >= 0 && g->zone.hdr && (uint32_t)ui->npc.inst < g->zone.instance_count)
         memcpy(npc_pos, g->zone.instances[ui->npc.inst].pos, sizeof(npc_pos));
     *price = rpg_travel_price(r, &ui->npc, index, g->zone.hdr && g->zone.hdr->kind == DZONE_KIND_EXTERIOR,
                               npc_pos);

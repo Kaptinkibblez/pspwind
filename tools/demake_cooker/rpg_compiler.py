@@ -11,9 +11,11 @@ order and writes one pack:
 
 Records: GLOB, GMST, SCPT (+SSCR start scripts), DIAL/INFO (load-order
 merge via PNAM/NNAM, SCVR conditions, journal flags, result scripts),
-FACT, SPEL, ENCH, CLAS, RACE, REGN and every object type (NPC_, CREA,
-WEAP, ARMO, CLOT, BOOK, ALCH, INGR, MISC, APPA, LOCK, PROB, REPA, LIGH,
-CONT, LEVI, LEVC, DOOR, ACTI, STAT). See docs/FORMATS.md (DRPG).
+FACT, SPEL, ENCH, CLAS, RACE, REGN, BSGN, SKIL, MGEF, SOUN, SNDG, PGRD and
+every object type (NPC_, CREA, WEAP, ARMO, CLOT, BOOK, ALCH, INGR, MISC,
+APPA, LOCK, PROB, REPA, LIGH, CONT, LEVI, LEVC, DOOR, ACTI, STAT) with
+their AI packages. Path grids become pgrd/<cell> entries loaded with the
+zone. See docs/FORMATS.md (DRPG).
 
     python3 rpg_compiler.py --data "/path/Morrowind/Data Files" --out build/cooked
 """
@@ -44,16 +46,21 @@ from dmcommon import LOG, fnv1a32  # noqa: E402
 NONE32 = 0xFFFFFFFF
 NONE16 = 0xFFFF
 DRPG_MAGIC = b"DRPG"
-DRPG_VERSION = 2
+DRPG_VERSION = 3
 TEXT_BLOCK = 32 * 1024
 
 # ------------------------------------------------------------------ layout
-HEADER_FMT = "<4sHHIII" + "II" * 21 + "III"   # see DRpgHeader in src/fmt.h
+HEADER_FMT = "<4sHHIII" + "II" * 24 + "III"   # see DRpgHeader in src/fmt.h
 SKILL_FMT = "<IBBH4fII"
-MGEF_FMT = "<IIffBBhhH"
+MGEF_FMT = "<IIffBBhhH4I"
 RACE_FMT = "<II7bx7Bx16H4fII"
 TRAVEL_FMT = "<4fI"
 MARKER_FMT = "<4fIB3x"
+AIPKG_FMT = "<3fIIHHBB8B2x"
+SOUND_FMT = "<IIBBBx"
+SOUNDGEN_FMT = "<IIB3x"
+PGRD_MAGIC = 0x52475044  # "DPGR"
+AI_WANDER, AI_TRAVEL, AI_ESCORT, AI_FOLLOW, AI_ACTIVATE = range(5)
 OBJECT_FMT = "<IIBBHIIIfi3IHHII6i"
 ACTOR_FMT = "<hHHHii8H6H27sBBbBBBBxxI"
 LIST_FMT = "<Ii"
@@ -77,7 +84,9 @@ SIZES = {name: struct.calcsize(fmt) for name, fmt in (
     ("DRpgGmst", GMST_FMT), ("DRpgScript", SCRIPT_FMT), ("DRpgVar", VAR_FMT),
     ("DRpgTopic", TOPIC_FMT), ("DRpgInfo", INFO_FMT), ("DRpgCond", COND_FMT),
     ("DRpgBlock", BLOCK_FMT), ("DRpgSkill", SKILL_FMT), ("DRpgMgef", MGEF_FMT),
-    ("DRpgRace", RACE_FMT), ("DRpgTravel", TRAVEL_FMT), ("DRpgMarker", MARKER_FMT))}
+    ("DRpgRace", RACE_FMT), ("DRpgTravel", TRAVEL_FMT), ("DRpgMarker", MARKER_FMT),
+    ("DRpgAiPackage", AIPKG_FMT), ("DRpgSound", SOUND_FMT), ("DRpgSoundGen", SOUNDGEN_FMT),
+    ("DPgrdHeader", "<IHHI"))}
 
 # object types (DRpgObject.type)
 OBJ_TYPES = ("NPC_", "CREA", "WEAP", "ARMO", "CLOT", "BOOK", "ALCH", "INGR", "MISC", "APPA",
@@ -329,6 +338,10 @@ class GameData:
         self.skills: Dict[int, esm.Record] = {}
         self.mgefs: Dict[int, esm.Record] = {}
         self.markers: List[Tuple[int, float, float, float, float, str]] = []
+        self.sounds: Dict[str, esm.Record] = {}
+        self.soundgens: Dict[str, esm.Record] = {}
+        self.pathgrids: Dict[Tuple[str, int, int], esm.Record] = {}
+        self.interiors: set = set()
         self.files: List[str] = []
 
     def load(self, paths: Sequence[str]) -> "GameData":
@@ -417,6 +430,20 @@ class GameData:
                 self._keyed(self.spells, rec)
             elif t == "ENCH":
                 self._keyed(self.enchants, rec)
+            elif t == "SOUN":
+                self._keyed(self.sounds, rec)
+            elif t == "SNDG":
+                self._keyed(self.soundgens, rec)
+            elif t == "PGRD":
+                d = rec.get("DATA")
+                if d is None or len(d) < 12:
+                    continue
+                gx, gy = struct.unpack_from("<ii", d, 0)
+                key = (zs(rec.get("NAME")).lower(), gx, gy)  # interior or exterior: decided at build
+                if rec.has("DELE"):
+                    self.pathgrids.pop(key, None)
+                else:
+                    self.pathgrids[key] = rec
             elif t == "CELL":
                 cell_name, interior, ref_id = "", False, None
                 for n, d in rec.subs:
@@ -429,10 +456,13 @@ class GameData:
                         cell_name = zs(d)
                     elif n == "DATA" and ref_id is None and len(d) >= 4:
                         interior = bool(struct.unpack_from("<i", d, 0)[0] & 1)
+                        if interior and cell_name:
+                            self.interiors.add(cell_name.lower())
                     elif n == "DATA" and ref_id is not None and len(d) >= 24:
-                        if ref_id in (mwdata.DIVINE_MARKER, mwdata.TEMPLE_MARKER):
+                        kinds = {mwdata.DIVINE_MARKER: 0, mwdata.TEMPLE_MARKER: 1, mwdata.PRISON_MARKER: 2}
+                        if ref_id in kinds:
                             x, y, z, _rx, _ry, rz = struct.unpack_from("<6f", d, 0)
-                            self.markers.append((0 if ref_id == mwdata.DIVINE_MARKER else 1, x, y, z, rz,
+                            self.markers.append((kinds[ref_id], x, y, z, rz,
                                                  cell_name.lower() if interior else ""))
                     elif n == "FRMR":
                         self._in_ref = True
@@ -499,6 +529,7 @@ class RpgBuilder:
         self.effects: List[tuple] = []
         self.actors: List[tuple] = []
         self.travel: List[tuple] = []
+        self.aipkgs: List[tuple] = []
         objs = []
         for key, (t, rec) in gd.objects.items():
             objs.append(self._object(key, t, rec))
@@ -563,6 +594,7 @@ class RpgBuilder:
             link = [_h(zs(rec.get("RNAM"))), _h(zs(rec.get("CNAM"))), _h(zs(rec.get("ANAM")))]
             stat[0] = self._npc_actor(rec)
             stat[1], stat[2] = self._travel(rec)
+            stat[3], stat[4] = self._ai_packages(rec)
             l1 = self._list(self._inventory(rec))
             l2 = self._list(self._spell_list(rec))
         elif t == "CREA":
@@ -572,8 +604,14 @@ class RpgBuilder:
             if cflags & 0x04:
                 flags |= OF_RESPAWN
             stat[0] = self._creature_actor(rec)
+            # 'r/rat' -> 'r/xrat': animation key (and preferred skeleton) for runtime spawning
+            mk = model_key(zs(rec.get("MODL"))) if rec.get("MODL") else ""
+            if mk:
+                head, _sep, base = mk.rpartition("/")
+                link[0] = _h(f"{head}/x{base}" if head else f"x{base}")
             stat[1] = _i32(rec.get("NPDT"), 0)  # creature type
             stat[2] = cflags
+            stat[3], stat[4] = self._ai_packages(rec)
             l1 = self._list(self._inventory(rec))
             l2 = self._list(self._spell_list(rec))
         elif t == "WEAP":
@@ -657,6 +695,7 @@ class RpgBuilder:
                 stat[3] = lflags
                 if lflags & 0x02:
                     flags |= OF_CARRY
+            link[2] = _h(zs(rec.get("SNAM")))  # looping sound
         elif t == "CONT":
             stat[0] = fbits(_f32(rec.get("CNDT")))
             cflags = _i32(rec.get("FLAG"))
@@ -713,10 +752,41 @@ class RpgBuilder:
             icon = tex or icon
             l2 = self._list(self._spell_list(rec))
         elif t == "REGN":
-            pass
+            # ambient sounds: (sound id, chance %)
+            l2 = self._list([(esm.zstr(d[:32]), d[32] if len(d) > 32 else 0)
+                             for n, d in rec.subs if n == "SNAM" and len(d) >= 32])
+        elif t == "DOOR":
+            stat[0] = _h(zs(rec.get("SNAM")))  # open sound
+            stat[1] = _h(zs(rec.get("ANAM")))  # close sound
         return (fnv1a32(key), self.names.opt(mwscript.display_text(name)), OT[t], sex, script, flags,
                 _h(icon_key(icon) if t != "BSGN" else dmcommon.texture_key(icon)) if icon else 0, _h(model_key(model)) if model else 0,
                 weight, value, link, l1, l2, [s32(v) for v in stat])
+
+    def _ai_packages(self, rec: esm.Record) -> Tuple[int, int]:
+        """AI_W/AI_T/AI_E/AI_F/AI_A (+CNDT cell) in record order."""
+        first = len(self.aipkgs)
+        pk: List[list] = []
+        for n, d in rec.subs:
+            if n == "AI_W" and len(d) >= 13:
+                dist, dur, hour = struct.unpack_from("<HHB", d, 0)
+                pk.append([0.0, 0.0, 0.0, 0, 0, dist, dur, AI_WANDER, hour, *d[5:13]])
+            elif n == "AI_T" and len(d) >= 12:
+                x, y, z = struct.unpack_from("<3f", d, 0)
+                pk.append([x, y, z, 0, 0, 0, 0, AI_TRAVEL, 0] + [0] * 8)
+            elif n in ("AI_E", "AI_F") and len(d) >= 46:
+                x, y, z, dur = struct.unpack_from("<3fH", d, 0)
+                target = esm.zstr(d[14:46])
+                pk.append([x, y, z, _h(target), 0, 0, dur, AI_ESCORT if n == "AI_E" else AI_FOLLOW, 0]
+                          + [0] * 8)
+            elif n == "CNDT" and pk and pk[-1][7] in (AI_ESCORT, AI_FOLLOW):
+                pk[-1][4] = _h(zs(d))
+            elif n == "AI_A" and len(d) >= 32:
+                pk.append([0.0, 0.0, 0.0, _h(esm.zstr(d[:32])), 0, 0, 0, AI_ACTIVATE, 0] + [0] * 8)
+        for p in pk:
+            p[5] = _u16(p[5])
+            p[6] = _u16(p[6])
+            self.aipkgs.append(tuple(p))
+        return first, len(pk)
 
     def _npc_actor(self, rec: esm.Record) -> int:
         d = rec.get("NPDT") or b""
@@ -880,9 +950,14 @@ class RpgBuilder:
             else:
                 school, cost, flags, speed, present = 0, 0.0, hard, 1.0, 0
             name = self.gmst_str(gmst, re.sub(r"(?<!^)(?=[A-Z])", " ", ident))
+            school = max(0, min(5, school))
+            snd = []
+            for tag, suffix in (("CSND", "cast"), ("BSND", "bolt"), ("HSND", "hit"), ("ASND", "area")):
+                sid = zs(rec.get(tag)) if rec is not None else ""
+                snd.append(_h(sid or f"{mwdata.SCHOOL_NAMES[school]} {suffix}"))
             self.mgef_rows.append((self.names.add(mwscript.display_text(name)), flags & 0xFFFFFFFF, cost,
-                                   speed, max(0, min(5, school)), present,
-                                   mwdata.RESISTED_BY.get(i, -1), mwdata.WEAKENED_BY.get(i, -1), 0))
+                                   speed, school, present,
+                                   mwdata.RESISTED_BY.get(i, -1), mwdata.WEAKENED_BY.get(i, -1), 0, *snd))
         races = []
         for key, (t, rec) in self.gd.objects.items():
             if t != "RACE":
@@ -907,6 +982,22 @@ class RpgBuilder:
         self.report["magic_effects_from_records"] = len(self.gd.mgefs)
         self.report["races"] = len(self.races)
         self.report["markers"] = len(self.markers)
+        sounds = []
+        for key, rec in self.gd.sounds.items():
+            d = rec.get("DATA") or b"\xff\x00\x00"
+            fname = zs(rec.get("FNAM"))
+            sounds.append((fnv1a32(key), _h(dmcommon.sound_key(fname)) if fname else 0,
+                           d[0], d[1] if len(d) > 1 else 0, d[2] if len(d) > 2 else 0))
+        self.sounds = sorted(sounds, key=lambda r: r[0])
+        gens = []
+        for rec in self.gd.soundgens.values():
+            gtype = _i32(rec.get("DATA"), 0, -1)
+            if not 0 <= gtype < len(mwdata.SNDG_TYPES):
+                continue
+            gens.append((_h(zs(rec.get("CNAM"))), _h(zs(rec.get("SNAM"))), gtype))
+        self.soundgens = sorted(gens, key=lambda r: (r[0], r[2]))
+        self.report["sounds"] = len(self.sounds)
+        self.report["soundgens"] = len(self.soundgens)
 
     # ---------------------------------------------------------- spells
     def build_spells(self) -> None:
@@ -1079,6 +1170,49 @@ class RpgBuilder:
         self.report["gmsts"] = len(gm)
 
     # ---------------------------------------------------------- output
+    def build_pathgrids(self) -> Dict[str, bytes]:
+        """PGRD -> pgrd/<interior name> or pgrd/<x>,<y> (world coordinates)."""
+        out: Dict[str, bytes] = {}
+        points_total = 0
+        for (name, gx, gy), rec in self.gd.pathgrids.items():
+            interior = bool(name) and name in self.gd.interiors
+            key = name if interior else f"{gx},{gy}"
+            ox, oy = (0.0, 0.0) if interior else (gx * 8192.0, gy * 8192.0)
+            pts_raw = rec.get("PGRP") or b""
+            npts = min(len(pts_raw) // 16, 0xFFFF)
+            pts, conn_counts = [], []
+            for i in range(npts):
+                x, y, z, _auto, nconn = struct.unpack_from("<iiiBB", pts_raw, 16 * i)
+                pts.append((x + ox, y + oy, float(z)))
+                conn_counts.append(nconn)
+            conns = rec.get("PGRC") or b""
+            flat = [struct.unpack_from("<I", conns, 4 * i)[0] for i in range(len(conns) // 4)]
+            edges: List[int] = []
+            firsts: List[int] = []
+            pos = 0
+            for i in range(npts):
+                firsts.append(len(edges))
+                for k in range(conn_counts[i]):
+                    if pos + k < len(flat) and flat[pos + k] < npts:
+                        edges.append(flat[pos + k])
+                pos += conn_counts[i]
+            firsts.append(len(edges))
+            if not npts or len(edges) > 0xFFFF:
+                continue
+            w = dmcommon.BinWriter()
+            w.pack("IHHI", PGRD_MAGIC, 1, npts, len(edges))
+            for p in pts:
+                w.pack("3f", *p)
+            for f in firsts:
+                w.pack("H", f)
+            for e in edges:
+                w.pack("H", e)
+            out["pgrd/" + key] = w.getvalue()
+            points_total += npts
+        self.report["pathgrids"] = len(out)
+        self.report["pathgrid_points"] = points_total
+        return out
+
     def build(self) -> Dict[str, bytes]:
         self.compile_scripts()
         self.build_globals()
@@ -1114,6 +1248,7 @@ class RpgBuilder:
             raw_total += len(raw)
         player_index = self.object_index.get(fnv1a32("player"), NONE32)
         entries["rpg/core"] = self._core(player_index, scripts, variables, starts, blocks)
+        entries.update(self.build_pathgrids())
         self.report["text_raw_bytes"] = raw_total
         self.report["text_packed_bytes"] = packed_total
         self.report["core_bytes"] = len(entries["rpg/core"])
@@ -1159,6 +1294,9 @@ class RpgBuilder:
         tables.append(table(RACE_FMT, self.races))
         tables.append(table(TRAVEL_FMT, self.travel))
         tables.append(table(MARKER_FMT, self.markers))
+        tables.append(table(AIPKG_FMT, self.aipkgs))
+        tables.append(table(SOUND_FMT, self.sounds))
+        tables.append(table(SOUNDGEN_FMT, self.soundgens))
         w.align(16)
         names_ofs = w.bytes(bytes(self.names.data))
         w.align(16)
@@ -1209,8 +1347,8 @@ def read_rpg(core: bytes) -> dict:
     magic, version, _flags, player, names_ofs, names_size = vals[:6]
     if magic != DRPG_MAGIC or version != DRPG_VERSION:
         raise ValueError("not a DRPG core")
-    pairs = vals[6:6 + 42]
-    topic_hash_ofs, size = vals[48], vals[49]
+    pairs = vals[6:6 + 48]
+    topic_hash_ofs, size = vals[54], vals[55]
     if size != len(core):
         raise ValueError("DRPG size mismatch")
     names = core[names_ofs:names_ofs + names_size]
@@ -1223,10 +1361,10 @@ def read_rpg(core: bytes) -> dict:
 
     fmts = [OBJECT_FMT, ACTOR_FMT, LIST_FMT, EFFECT_FMT, SPELL_FMT, FACTION_FMT, REACTION_FMT,
             GLOBAL_FMT, GMST_FMT, SCRIPT_FMT, VAR_FMT, "<H", TOPIC_FMT, INFO_FMT, COND_FMT, BLOCK_FMT,
-            SKILL_FMT, MGEF_FMT, RACE_FMT, TRAVEL_FMT, MARKER_FMT]
+            SKILL_FMT, MGEF_FMT, RACE_FMT, TRAVEL_FMT, MARKER_FMT, AIPKG_FMT, SOUND_FMT, SOUNDGEN_FMT]
     keys = ["objects", "actors", "lists", "effects", "spells", "factions", "reactions", "globals",
             "gmsts", "scripts", "vars", "starts", "topics", "infos", "conds", "blocks", "skills",
-            "mgefs", "races", "travel", "markers"]
+            "mgefs", "races", "travel", "markers", "aipkgs", "sounds", "soundgens"]
     out = {"player": player, "name": name}
     for i, (key, fmt) in enumerate(zip(keys, fmts)):
         ofs, count = pairs[2 * i], pairs[2 * i + 1]

@@ -166,6 +166,13 @@ int pak_read(const Pak *p, const DPakEntry *e, void *dst)
     return file_read_at(p->handle, e->ofs, dst, e->size);
 }
 
+int pak_read_range(const Pak *p, const DPakEntry *e, uint32_t ofs, void *dst, uint32_t size)
+{
+    if (!p->handle || !e || ofs > e->size || size > e->size - ofs)
+        return -1;
+    return size ? file_read_at(p->handle, e->ofs + ofs, dst, size) : 0;
+}
+
 void *pak_load(const Pak *p, uint32_t hash, MemRegionId region, uint32_t align,
                uint32_t *size_out)
 {

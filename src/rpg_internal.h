@@ -11,6 +11,7 @@
 #define RPG_POWER_SALT 0x2545F491u /* item store owner for "power used on day" records */
 
 void rpg_notify(Rpg *r, const char *gmst, const char *fallback);
+const char *summon_gmst(int effect);   /* GMST naming the creature of a summon effect */
 int rpg_is_player(const Rpg *r, const VmRef *ref);
 int rpg_roll100(Rpg *r);
 const DRpgObject *rpg_actor_object(const Rpg *r, const VmRef *ref);

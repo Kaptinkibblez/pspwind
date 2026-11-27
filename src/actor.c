@@ -17,75 +17,93 @@ static int16_t find_node(const ZoneMesh *m, uint32_t hash)
     return -1;
 }
 
+/* Binds one actor record; 1 bound, 0 skipped (bad skeleton), -1 out of memory. */
+static int bind_actor(Actor *a, const Zone *z, const DZoneActor *rec, uint32_t seed)
+{
+    const DZoneInstance *in = &z->instances[rec->instance];
+    const ZoneMesh *skel = &z->meshes[rec->skeleton];
+    const uint32_t *bones = (const uint32_t *)(z->base + rec->part_bone_ofs);
+    uint32_t nodes, k;
+    Vec4 pos;
+    if (!skel->hdr || skel->hdr->node_count > ACTOR_MAX_BONES)
+        return 0;
+    memset(a, 0, sizeof(*a));
+    a->rec = rec;
+    a->instance = rec->instance;
+    a->skel = skel;
+    nodes = skel->hdr->node_count;
+    if (rec->anim != DZONE_NONE && z->anims[rec->anim].hdr)
+        a->anim = &z->anims[rec->anim];
+    a->bone_track = (int16_t *)mem_try_alloc(MEM_REGION_ZONE, nodes * sizeof(int16_t), 4);
+    a->pose = (Mat4 *)mem_try_alloc(MEM_REGION_ZONE, nodes * sizeof(Mat4), 64);
+    if (!a->bone_track || !a->pose)
+        return -1;
+    for (k = 0; k < nodes; ++k) {
+        uint32_t t;
+        a->bone_track[k] = -1;
+        if (!a->anim)
+            continue;
+        for (t = 0; t < a->anim->hdr->track_count; ++t) {
+            if (a->anim->tracks[t].bone_hash == skel->nodes[k].name_hash) {
+                a->bone_track[k] = (int16_t)t;
+                break;
+            }
+        }
+    }
+    for (k = 0; k < rec->part_count; ++k) {
+        const ZoneMesh *pm = &z->meshes[rec->parts[k]];
+        uint32_t j;
+        a->part_bone[k] = -1;
+        if (!pm->hdr)
+            continue;
+        a->part_mesh[k] = pm;
+        a->part_map[k] = (int16_t *)mem_try_alloc(MEM_REGION_ZONE, pm->hdr->node_count * sizeof(int16_t), 4);
+        if (!a->part_map[k])
+            return -1;
+        for (j = 0; j < pm->hdr->node_count; ++j)
+            a->part_map[k][j] = find_node(skel, pm->nodes[j].name_hash);
+        if (bones[k])
+            a->part_bone[k] = find_node(skel, bones[k]);
+    }
+    a->scale = in->scale;
+    pos = vec4(in->pos[0], in->pos[1], in->pos[2], 1.0f);
+    actor_set_placement(a, &pos, in->rot[2]);
+    actor_play(a, pw_hash_name("idle"), 1);
+    /* desynchronise idle loops of neighbours */
+    a->time = (float)(seed * 7 % 13) * 0.17f;
+    actor_pose(a);
+    return 1;
+}
+
 int actors_init(ActorSet *s, const Zone *z)
 {
-    uint32_t i, k, n = 0;
+    uint32_t i, n = 0;
     memset(s, 0, sizeof(*s));
-    if (!z->hdr || z->hdr->actor_count == 0)
+    if (!z->hdr)
         return 0;
-    s->list = (Actor *)mem_try_alloc(MEM_REGION_ZONE, z->hdr->actor_count * sizeof(Actor), 64);
+    s->capacity = z->hdr->actor_count + ZONE_SPAWN_SLOTS;
+    s->list = (Actor *)mem_try_alloc(MEM_REGION_ZONE, s->capacity * sizeof(Actor), 64);
     if (!s->list)
         return -1;
     for (i = 0; i < z->hdr->actor_count; ++i) {
-        const DZoneActor *rec = &z->actor_recs[i];
-        const DZoneInstance *in = &z->instances[rec->instance];
-        Actor *a = &s->list[n];
-        const ZoneMesh *skel = &z->meshes[rec->skeleton];
-        const uint32_t *bones = (const uint32_t *)(z->base + rec->part_bone_ofs);
-        uint32_t nodes;
-        Vec4 pos;
-        if (!skel->hdr || skel->hdr->node_count > ACTOR_MAX_BONES)
-            continue;
-        memset(a, 0, sizeof(*a));
-        a->rec = rec;
-        a->instance = rec->instance;
-        a->skel = skel;
-        nodes = skel->hdr->node_count;
-        if (rec->anim != DZONE_NONE && z->anims[rec->anim].hdr)
-            a->anim = &z->anims[rec->anim];
-        a->bone_track = (int16_t *)mem_try_alloc(MEM_REGION_ZONE, nodes * sizeof(int16_t), 4);
-        a->pose = (Mat4 *)mem_try_alloc(MEM_REGION_ZONE, nodes * sizeof(Mat4), 64);
-        if (!a->bone_track || !a->pose)
+        int rc = bind_actor(&s->list[n], z, &z->actor_recs[i], i);
+        if (rc < 0)
             return -1;
-        for (k = 0; k < nodes; ++k) {
-            uint32_t t;
-            a->bone_track[k] = -1;
-            if (!a->anim)
-                continue;
-            for (t = 0; t < a->anim->hdr->track_count; ++t) {
-                if (a->anim->tracks[t].bone_hash == skel->nodes[k].name_hash) {
-                    a->bone_track[k] = (int16_t)t;
-                    break;
-                }
-            }
-        }
-        for (k = 0; k < rec->part_count; ++k) {
-            const ZoneMesh *pm = &z->meshes[rec->parts[k]];
-            uint32_t j;
-            a->part_bone[k] = -1;
-            if (!pm->hdr)
-                continue;
-            a->part_mesh[k] = pm;
-            a->part_map[k] = (int16_t *)mem_try_alloc(MEM_REGION_ZONE,
-                                                      pm->hdr->node_count * sizeof(int16_t), 4);
-            if (!a->part_map[k])
-                return -1;
-            for (j = 0; j < pm->hdr->node_count; ++j)
-                a->part_map[k][j] = find_node(skel, pm->nodes[j].name_hash);
-            if (bones[k])
-                a->part_bone[k] = find_node(skel, bones[k]);
-        }
-        a->scale = in->scale;
-        pos = vec4(in->pos[0], in->pos[1], in->pos[2], 1.0f);
-        actor_set_placement(a, &pos, in->rot[2]);
-        actor_play(a, pw_hash_name("idle"), 1);
-        /* desynchronise idle loops of neighbours */
-        a->time = (float)(i * 7 % 13) * 0.17f;
-        actor_pose(a);
-        n++;
+        n += (uint32_t)rc;
     }
     s->count = n;
     return 0;
+}
+
+int actor_spawn(ActorSet *s, const Zone *z, uint32_t rec_index)
+{
+    int rc;
+    if (!s->list || s->count >= s->capacity || rec_index >= z->actor_rec_count)
+        return -1;
+    rc = bind_actor(&s->list[s->count], z, &z->actor_recs[rec_index], s->count);
+    if (rc <= 0)
+        return -1;
+    return (int)s->count++;
 }
 
 void actor_set_placement(Actor *a, const Vec4 *pos, float yaw)
@@ -141,19 +159,24 @@ void actor_pose(Actor *a)
 void actors_update(ActorSet *s, float dt, const Vec4 *viewer, float max_dist)
 {
     uint32_t i;
+    float lod = max_dist * 0.5f;
+    s->frame++;
     for (i = 0; i < s->count; ++i) {
         Actor *a = &s->list[i];
         float dx = a->pos.x - viewer->x, dy = a->pos.y - viewer->y, dz = a->pos.z - viewer->z;
+        float d2 = dx * dx + dy * dy + dz * dz;
         a->time += dt;
         if (a->group_rec && !a->loop) {
             float len = (float)(a->group_rec->stop - a->group_rec->start) / a->anim->hdr->fps;
             if (a->time > len)
                 a->time = len; /* hold the last frame */
         }
-        if (dx * dx + dy * dy + dz * dz <= max_dist * max_dist)
-            actor_pose(a);
-        else
+        if (d2 > max_dist * max_dist)
             a->posed = 0;
+        else if (d2 > lod * lod && a->posed && ((s->frame + i) & 1u))
+            continue; /* far half: re-pose every other frame (staggered), keep the last pose */
+        else
+            actor_pose(a);
     }
 }
 
