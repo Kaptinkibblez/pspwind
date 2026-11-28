@@ -21,6 +21,7 @@
 #define TAG(a, b, c, d) ((uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c) << 16) | ((uint32_t)(d) << 24))
 #define SAVE_MAX_ACTORS 512
 #define SAVE_MAX_BYTES PW_MB(2)
+PW_STATIC_ASSERT(sizeof(GameRoamer) == 80, game_roamer);
 
 typedef struct {
     float hour, timescale;
@@ -41,7 +42,7 @@ typedef struct {
 } SaveGameState;
 
 typedef struct {
-    uint32_t object, refnum;
+    uint32_t object, refnum, key;
     float pos[3];
     float yaw;
     float home[3];
@@ -358,6 +359,7 @@ int save_game(Game *g, const char *dir, int slot, float playtime, char *err, uin
         memset(sa, 0, sizeof(*sa));
         sa->object = in->object_hash;
         sa->refnum = in->refnum;
+        sa->key = game_actor_ref(g, i).key;
         sa->pos[0] = a->pos.x;
         sa->pos[1] = a->pos.y;
         sa->pos[2] = a->pos.z;
@@ -378,13 +380,17 @@ int save_game(Game *g, const char *dir, int slot, float playtime, char *err, uin
             sa->has_pkg = s->has_pkg;
         }
     }
-    section(&f, TAG('A', 'I', 'S', 'T'), 12u + AI_STOLEN_MAX * 8u + n * (uint32_t)sizeof(SaveActor));
+    section(&f, TAG('A', 'I', 'S', 'T'), 12u + AI_STOLEN_MAX * 12u + n * (uint32_t)sizeof(SaveActor));
     sf_write(&f, &g->ai.stolen_used, 4);
     sf_write(&f, g->ai.stolen_item, AI_STOLEN_MAX * 4u);
     sf_write(&f, g->ai.stolen_count, AI_STOLEN_MAX * 4u);
+    sf_write(&f, g->ai.stolen_owner, AI_STOLEN_MAX * 4u);
     sf_write(&f, &g->ai.spawn_serial, 4);
     sf_write(&f, &n, 4);
     sf_write(&f, actors, n * (uint32_t)sizeof(SaveActor));
+    section(&f, TAG('R', 'O', 'A', 'M'), 4u + g->roam_count * (uint32_t)sizeof(GameRoamer));
+    sf_write(&f, &g->roam_count, 4);
+    sf_write(&f, g->roam, g->roam_count * (uint32_t)sizeof(GameRoamer));
 
     /* header */
     h.magic = SAVE_MAGIC;
@@ -556,7 +562,7 @@ static int validate(Game *g, const Sections *s, const uint8_t *ai_sec, uint32_t 
     r.p = ai_sec;
     r.left = ai_size;
     n = take_u32(&r);
-    take(&r, AI_STOLEN_MAX * 8u);
+    take(&r, AI_STOLEN_MAX * 12u);
     take_u32(&r);
     k = take_u32(&r);
     if (r.bad || n > AI_STOLEN_MAX || k > SAVE_MAX_ACTORS || r.left != k * sizeof(SaveActor))
@@ -695,10 +701,12 @@ int load_game(Game *g, const char *dir, int slot, float *playtime, char *err, ui
     int32_t len;
     DSaveHeader h, now;
     Sections s;
-    const uint8_t *ai_sec = NULL;
+    const uint8_t *ai_sec = NULL, *roam_sec = NULL;
+    uint32_t roam_size = 0, roam_count = 0;
     uint32_t ai_size = 0, stolen_used, spawn_serial, actor_count, i;
     uint32_t stolen_item[AI_STOLEN_MAX];
     int32_t stolen_count[AI_STOLEN_MAX];
+    uint32_t stolen_owner[AI_STOLEN_MAX];
     SaveGameState gs;
     int rc, zi = -1;
     Reader r;
@@ -747,6 +755,11 @@ int load_game(Game *g, const char *dir, int slot, float *playtime, char *err, ui
             ai_size = size;
             continue;
         }
+        if (tag == TAG('R', 'O', 'A', 'M')) {
+            roam_sec = data;
+            roam_size = size;
+            continue;
+        }
         for (k = 0; k < 8; ++k)
             if (sec_tags[k] == tag) {
                 s.sec[k] = data;
@@ -756,8 +769,13 @@ int load_game(Game *g, const char *dir, int slot, float *playtime, char *err, ui
     for (i = 0; i < 8; ++i)
         if (!s.sec[i])
             r.bad = 1;
-    if (r.bad || !ai_sec)
+    if (r.bad || !ai_sec || !roam_sec)
         LOAD_FAIL("Slot %d is incomplete.", slot);
+    if (roam_size < 4)
+        LOAD_FAIL("Slot %d is inconsistent (check 27).", slot);
+    memcpy(&roam_count, roam_sec, 4);
+    if (roam_count > GAME_ROAMERS || roam_size != 4u + roam_count * (uint32_t)sizeof(GameRoamer))
+        LOAD_FAIL("Slot %d is inconsistent (check 27).", slot);
     rc = validate(g, &s, ai_sec, ai_size);
     if (rc)
         LOAD_FAIL("Slot %d is inconsistent (check %d).", slot, rc);
@@ -770,10 +788,13 @@ int load_game(Game *g, const char *dir, int slot, float *playtime, char *err, ui
     stolen_used = take_u32(&r);
     memcpy(stolen_item, take(&r, AI_STOLEN_MAX * 4u), sizeof(stolen_item));
     memcpy(stolen_count, take(&r, AI_STOLEN_MAX * 4u), sizeof(stolen_count));
+    memcpy(stolen_owner, take(&r, AI_STOLEN_MAX * 4u), sizeof(stolen_owner));
     spawn_serial = take_u32(&r);
     actor_count = take_u32(&r);
     memcpy(actors, take(&r, actor_count * (uint32_t)sizeof(SaveActor)), actor_count * sizeof(SaveActor));
     apply_vm(g, &s);
+    memcpy(g->roam, roam_sec + 4, roam_count * sizeof(GameRoamer));
+    g->roam_count = roam_count;
     mem_release_hi(region, mark); /* the zone load below reuses the scratch */
 #undef LOAD_FAIL
 
@@ -788,7 +809,10 @@ int load_game(Game *g, const char *dir, int slot, float *playtime, char *err, ui
         g->ui_event = GAME_UI_NONE;
         g->menu_mode = 0;
         g->request.pending = 0;
-        if (game_enter_zone(g, (uint32_t)zi, gs.pos, rot, zerr, sizeof(zerr)) != 0) {
+        g->loading = 1; /* the zone being replaced is not stored into the loaded game */
+        rc = game_enter_zone(g, (uint32_t)zi, gs.pos, rot, zerr, sizeof(zerr));
+        g->loading = 0;
+        if (rc != 0) {
             snprintf(err, errlen, "Zone of slot %d failed to load: %s", slot, zerr);
             return -1;
         }
@@ -804,11 +828,12 @@ int load_game(Game *g, const char *dir, int slot, float *playtime, char *err, ui
     g->ai.stolen_used = stolen_used;
     memcpy(g->ai.stolen_item, stolen_item, sizeof(stolen_item));
     memcpy(g->ai.stolen_count, stolen_count, sizeof(stolen_count));
+    memcpy(g->ai.stolen_owner, stolen_owner, sizeof(stolen_owner));
     /* spawned creatures come back first, then everyone takes their place */
     for (i = 0; i < actor_count; ++i) {
         const SaveActor *sa = &actors[i];
         if ((sa->refnum & 0xFF000000u) == ZONE_SPAWN_REFNUM && !sa->hidden && i >= g->actors.count) {
-            int a = ai_spawn(g, sa->object, sa->pos, sa->yaw, sa->ally, sa->life);
+            int a = ai_spawn(g, sa->object, sa->pos, sa->yaw, sa->ally, sa->life, sa->key);
             if (a >= 0)
                 g->zone.inst_rw[g->actors.list[a].instance].refnum = sa->refnum;
         }

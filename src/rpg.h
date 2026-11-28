@@ -88,6 +88,9 @@ typedef struct {
     /* summon effects: places the creature next to the caster for duration
      * seconds (it fights for the caster); returns 1 when it appeared */
     int (*summon)(void *user, const VmRef *caster, uint32_t creature, int effect, float duration);
+    /* 1 when the merchant refuses to buy the item (stolen from them or
+     * their faction); may be NULL */
+    int (*refuses)(void *user, const VmRef *npc, uint32_t item);
     void *user;
 } RpgHost;
 
@@ -225,6 +228,13 @@ int rpg_weapon_ranged(Rpg *r, const VmRef *ref);
 int rpg_weapon_skill(Rpg *r, const VmRef *ref);
 /* melee or ranged hit resolution; strength 0..1 */
 RpgHit rpg_attack(Rpg *r, const VmRef *attacker, const VmRef *victim, float strength);
+/* a fired arrow / bolt / thrown weapon arriving: the weapon and ammo it was
+ * shot with (object hashes, captured by rpg_shot_items before the ammo was
+ * consumed); no wear on the launcher, enchanted ammo strikes once */
+RpgHit rpg_attack_shot(Rpg *r, const VmRef *attacker, const VmRef *victim, float strength, uint32_t weapon,
+                       uint32_t ammo);
+/* what a ranged weapon would fire now; 0 when the weapon is not ranged */
+int rpg_shot_items(Rpg *r, const VmRef *ref, uint32_t *weapon, uint32_t *ammo);
 /* consumes ammunition / a thrown weapon; 0 when nothing to shoot */
 int rpg_consume_ammo(Rpg *r, const VmRef *ref);
 int rpg_pick_lock(Rpg *r, const VmRef *target, int lock_level, int *new_level, char *msg, uint32_t cap);
@@ -299,5 +309,8 @@ int rpg_class_spec(const Rpg *r, uint32_t cls);
 int rpg_class_attr(const Rpg *r, uint32_t cls, int i);
 int rpg_class_skill_type(const Rpg *r, uint32_t cls, int skill);
 int rpg_visited(const Rpg *r, int x, int y);
+/* A creature / item from a leveled list for a level (nested lists resolved;
+ * "chance none" honoured); 0 when the list yields nothing. */
+uint32_t rpg_leveled(Rpg *r, uint32_t list, int level);
 
 #endif /* PSPWIND_RPG_H */

@@ -353,6 +353,28 @@ typedef struct {
     uint32_t reserved[3];
 } DZoneActor;
 
+/* zones.dpak "actor/<id>": how to assemble an NPC or creature at run time
+ * (spawning, followers changing zones). Meshes and clips by pack hash. The
+ * entry's directory hash is pw_hash_name(id) ^ DACT_SALT, so the template
+ * of an object is found from its id hash. */
+#define DACT_MAGIC 0x54434144u /* "DACT" */
+#define DACT_SALT 0x41C7A2E5u
+typedef struct {
+    uint32_t mesh;          /* meshes.dpak hash */
+    uint32_t bone;          /* attachment bone name hash, 0 = skinned segments */
+} DActorPart;
+
+typedef struct {
+    uint32_t magic;
+    uint16_t version;       /* 1 */
+    uint16_t flags;         /* DZONE_ACTOR_F_* */
+    uint32_t skeleton;      /* meshes.dpak hash */
+    uint32_t anim;          /* anims.dpak hash or 0 */
+    DActorPart parts[DZONE_ACTOR_MAX_PARTS];
+    uint32_t part_count;
+    uint32_t part_flags;    /* bit i: part i mirrored */
+} DActorTemplate;
+
 typedef struct {
     uint32_t magic; /* DZONE_MAGIC */
     uint16_t version;
@@ -1005,6 +1027,7 @@ PW_STATIC_ASSERT(sizeof(DAnimHeader) == 48, danim_header);
 PW_STATIC_ASSERT(sizeof(DAnimTrack) == 16, danim_track);
 PW_STATIC_ASSERT(sizeof(DAnimGroup) == 24, danim_group);
 PW_STATIC_ASSERT(sizeof(DZoneActor) == 64, dzone_actor);
+PW_STATIC_ASSERT(sizeof(DActorTemplate) == 152, dactor_template);
 PW_STATIC_ASSERT(sizeof(DRpgHeader) == 224, drpgheader);
 PW_STATIC_ASSERT(sizeof(DRpgObject) == 80, drpgobject);
 PW_STATIC_ASSERT(sizeof(DRpgActor) == 84, drpgactor);

@@ -623,7 +623,7 @@ void gfx_draw_zone(const Zone *z, const ActorSet *actors, const Camera *cam,
     }
 
     /* instance visibility once per frame */
-    for (i = 0; i < h->instance_count; ++i) {
+    for (i = 0; i < z->instance_count; ++i) {
         float d;
         inst_visible[i] = (uint8_t)(!z->inst_hidden[i] && zone_instance_mesh(z, i) &&
                                     visible(&frustum, cam, z->instances[i].bound, fog_far, &d));
@@ -665,7 +665,7 @@ void gfx_draw_zone(const Zone *z, const ActorSet *actors, const Camera *cam,
             }
         }
         /* instanced models */
-        for (i = 0; i < h->instance_count; ++i) {
+        for (i = 0; i < z->instance_count; ++i) {
             const ZoneMesh *m;
             uint32_t k;
             if (!inst_visible[i])
@@ -730,4 +730,87 @@ void gfx_draw_zone(const Zone *z, const ActorSet *actors, const Camera *cam,
     }
     sceGuDepthMask(GU_FALSE);
     stats->list_bytes = (uint32_t)((uintptr_t)sceGuGetMemory(0) - (uintptr_t)g_list);
+}
+
+void gfx_draw_props(const GfxProp *props, uint32_t count, const Camera *cam, GfxStats *stats)
+{
+    static Mat4 model, identity;
+    Vec4 f;
+    float rt[3], up[3], len;
+    uint32_t i, k, glows = 0;
+    DynVertex *buf, *v;
+    if (!count)
+        return;
+    g_stats = stats;
+    mat4_identity(&identity);
+    /* models (ammo): lit, opaque or cut-out */
+    for (i = 0; i < count; ++i) {
+        const ZoneMesh *m = props[i].mesh;
+        if (!m || !m->hdr) {
+            glows++;
+            continue;
+        }
+        for (k = 0; k < m->hdr->batch_count; ++k) {
+            const DMeshBatch *b = &m->batches[k];
+            const DTexHeader *tex = b->texture != DMESH_NO_TEXTURE ? m->tex[b->texture] : NULL;
+            mat4_mul(&model, &props[i].world, &m->batch_model[k]);
+            draw_batch(b, m->base, &model, tex, 1);
+        }
+    }
+    if (!glows)
+        return;
+    /* glowing bolts: additive camera-facing diamonds, bright centre */
+    gfx_camera_forward(cam, &f);
+    rt[0] = f.y;
+    rt[1] = -f.x;
+    rt[2] = 0.0f;
+    len = sqrtf(rt[0] * rt[0] + rt[1] * rt[1]);
+    if (len < 1e-4f) {
+        rt[0] = 1.0f;
+        rt[1] = 0.0f;
+    } else {
+        rt[0] /= len;
+        rt[1] /= len;
+    }
+    up[0] = rt[1] * f.z - rt[2] * f.y;
+    up[1] = rt[2] * f.x - rt[0] * f.z;
+    up[2] = rt[0] * f.y - rt[1] * f.x;
+    buf = (DynVertex *)sceGuGetMemory((int)(glows * 12u * sizeof(DynVertex)));
+    v = buf;
+    for (i = 0; i < count; ++i) {
+        static const float corner[5][2] = { { 1, 0 }, { 0, 1 }, { -1, 0 }, { 0, -1 }, { 1, 0 } };
+        const float *c = props[i].pos;
+        float sz = props[i].size;
+        uint32_t edge = props[i].color & 0x00FFFFFFu;
+        if (props[i].mesh && props[i].mesh->hdr)
+            continue;
+        for (k = 0; k < 4; ++k) {
+            int e;
+            v->u = v->v = 0.0f;
+            v->color = props[i].color;
+            v->x = c[0];
+            v->y = c[1];
+            v->z = c[2];
+            ++v;
+            for (e = 0; e < 2; ++e) {
+                const float *q = corner[k + (uint32_t)e];
+                v->u = v->v = 0.0f;
+                v->color = edge;
+                v->x = c[0] + (rt[0] * q[0] + up[0] * q[1]) * sz;
+                v->y = c[1] + (rt[1] * q[0] + up[1] * q[1]) * sz;
+                v->z = c[2] + (rt[2] * q[0] + up[2] * q[1]) * sz;
+                ++v;
+            }
+        }
+    }
+    sceGuSetMatrix(GU_MODEL, (const ScePspFMatrix4 *)&identity);
+    set_flag(GU_LIGHTING, 0, &g_lighting);
+    set_flag(GU_ALPHA_TEST, 0, &g_alpha_test);
+    set_flag(GU_BLEND, 1, &g_blend);
+    set_flag(GU_CULL_FACE, 0, &g_cull);
+    sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_FIX, 0, 0xFFFFFFFFu);
+    sceGuDepthMask(GU_TRUE);
+    bind_texture(NULL);
+    draw_dynamic(buf, v);
+    sceGuDepthMask(GU_FALSE);
 }

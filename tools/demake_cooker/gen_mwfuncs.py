@@ -45,7 +45,9 @@ PROPS += ([("ATTRDMG_" + a.upper(), None) for a in ATTRIBUTES]
           + [("SKILLPROG_" + k.upper(), None) for k in SKILLS]
           + [("LVLATTR_" + a.upper(), None) for a in ATTRIBUTES]
           + [(n, None) for n in ("LEVELPROG", "DEAD", "LOCK", "GOLDPOOL", "HOSTILE", "DISPTEMP",
-                                "CHARM_TARGET", "RESTOCK_DAY", "KILLS", "BOOKREAD")])
+                                "CHARM_TARGET", "RESTOCK_DAY", "KILLS", "BOOKREAD",
+                                # M7: where an actor was left (zone change persistence)
+                                "PLACED", "POSX", "POSY", "POSZ", "POSROT")])
 PROP_ID = {name: i for i, (name, _) in enumerate(PROPS)}
 
 FAMILIES = ["NONE", "GET", "SET", "MOD", "SETDYN", "MODDYN", "RATIO", "GET_PC", "SET_PC", "MOD_PC"]

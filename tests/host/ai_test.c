@@ -402,9 +402,9 @@ int main(int argc, char **argv)
         /* spawning by id (PlaceAtPC) and a spawned enemy */
         {
             float p[3] = { g->body.pos.x + 400.0f, g->body.pos.y, g->body.pos.z };
-            int a = ai_spawn(g, pw_hash_name("tw_snapper"), p, 0.0f, 0, -1.0f);
+            int a = ai_spawn(g, pw_hash_name("tw_snapper"), p, 0.0f, 0, -1.0f, 0);
             CHECK(a >= 0 && g->zone.instance_count > g->zone.hdr->instance_count, "snapper spawned (%d)", a);
-            CHECK(ai_spawn(g, pw_hash_name("tw_villager"), p, 0.0f, 0, -1.0f) < 0, "NPCs are not spawned");
+            CHECK(ai_spawn(g, pw_hash_name("tw_coin"), p, 0.0f, 0, -1.0f, 0) < 0, "items are not actors");
             if (a >= 0) {
                 step(0, 0, 0, 0, 1.0f);
                 if (getenv("AI_DEBUG"))

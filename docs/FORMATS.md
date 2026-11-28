@@ -125,6 +125,21 @@ with the `x`-prefixed `.kf`; race skin parts are chosen by race and sex
 record. Creatures use the `x`-prefixed variant of their model and `.kf`
 when present.
 
+### Actor templates (`zones.dpak` entry `actor/<id>`)
+
+There is one `DActorTemplate` (152 bytes) per NPC and creature, used to
+spawn actors at run time. It holds:
+
+* magic "DACT", version, flags (`DZONE_ACTOR_F_*`);
+* a skeleton mesh hash and a clip hash (0 = none);
+* `parts[16]` of `{mesh, bone}`, then `part_count` and `part_flags` (bit
+  *n* = part *n* mirrored).
+
+Parts are chosen exactly as for placed actors. The entry hash is
+`fnv1a32(id) ^ 0x41C7A2E5` (`DACT_SALT`), so an object id can never collide
+with a zone, world or mesh entry. The pack directory and the cooker's
+reader check entries against this salted hash.
+
 ## DRPG — RPG database (`rpg.dpak`, version 3)
 
 | Entry | Contents |
@@ -171,6 +186,15 @@ names none); DOOR `stat[0]`/`stat[1]` = open/close sounds; LIGH `link[2]` =
 looping sound; REGN `list2` = ambient sounds `{sound, chance %}`; CREA
 `link[0]` = hash of the "x" variant model key (`r/rat` → `r/xrat`), the
 animation and preferred skeleton when a creature is spawned at run time.
+
+Milestone 7 additions, without a version change (new fields in existing
+slots):
+
+* REGN `link[0]` is the sleep-creature leveled list (BNAM, 0 = none).
+* `DRpgInfo.sound` is the response's recorded voice, keyed like a
+  `music.dpak` entry (`pw_hash_name("sound/" + path without extension)`).
+* Remembered actor positions are VM stat-store properties (`PLACED`,
+  `POSX`, `POSY`, `POSZ`, `POSROT`), so they are saved with the stat store.
 
 Path grids: `DPgrdHeader {magic "DPGR", version 1, count, edge_count}`,
 then `float[3]` points in world coordinates (exterior cells are offset by
@@ -240,6 +264,10 @@ their slot index, `VMIT` used inventory slots with their index (equipment
 refers to stacks by index), `VMJR` quest state, journal, known topics,
 heard infos, faction ranks, `RPGS` the mechanics state, `GAME` zone and
 player, `AIST` stolen goods, spawn serial and every actor of the current
-zone (position, state, package; spawned creatures are re-created). Files
+zone (position, state, package, identity key; spawned actors are re-created
+with their key), and the owner of each stolen-goods entry. Version 2 adds
+`ROAM`: the count and `GameRoamer[]` (80 bytes each: key, object, home
+zone entry, position, facing, life, summoner, summon effect, package,
+ally) of the actors living away from their cooked place. Files
 are written as `slot<N>.tmp` and renamed; loading checks everything before
 it changes the game.

@@ -14,6 +14,7 @@ tests/host/mech_test
 tests/host/audio_test
 tests/host/ai_test
 tests/host/save_test
+tests/host/persist_test
 
 # Python
 __pycache__/

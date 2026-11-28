@@ -681,7 +681,12 @@ enum {
     MWP_RESTOCK_DAY = 156,
     MWP_KILLS = 157,
     MWP_BOOKREAD = 158,
-    MWP_COUNT = 159
+    MWP_PLACED = 159,
+    MWP_POSX = 160,
+    MWP_POSY = 161,
+    MWP_POSZ = 162,
+    MWP_POSROT = 163,
+    MWP_COUNT = 164
 };
 
 /* stat verb families (mw_func_fam) */

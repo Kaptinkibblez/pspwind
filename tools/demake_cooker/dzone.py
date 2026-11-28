@@ -361,6 +361,30 @@ class WorldZoneEntry:
     bytes: int = 0
 
 
+ACTOR_TEMPLATE_MAGIC = 0x54434144  # "DACT"
+ACTOR_TEMPLATE_FMT = "<IHHII" + "II" * ACTOR_MAX_PARTS + "II"
+
+
+def write_actor_template(flags: int, skeleton: int, anim: int, parts) -> bytes:
+    """actor/<id>: skeleton and clip hashes plus up to 16 body parts
+    (mesh hash, attachment bone hash; part_flags bit i = mirrored)."""
+    parts = list(parts)[:ACTOR_MAX_PARTS]
+    flat = []
+    mirror = 0
+    for i in range(ACTOR_MAX_PARTS):
+        if i < len(parts):
+            mesh, bone, mirrored = parts[i]
+            flat += [mesh, bone]
+            mirror |= (1 << i) if mirrored else 0
+        else:
+            flat += [0, 0]
+    return struct.pack(ACTOR_TEMPLATE_FMT, ACTOR_TEMPLATE_MAGIC, 1, flags, skeleton, anim, *flat,
+                       len(parts), mirror)
+
+
+SIZES["DActorTemplate"] = struct.calcsize(ACTOR_TEMPLATE_FMT)
+
+
 def write_world(zone_size: int, zones: Sequence[WorldZoneEntry],
                 ext: Dict[Tuple[int, int], int], interiors: Dict[str, int]) -> bytes:
     strings = StringTable()

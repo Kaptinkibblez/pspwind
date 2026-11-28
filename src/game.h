@@ -84,6 +84,42 @@ enum { GAME_CG_NAME = 1, GAME_CG_RACE = 2, GAME_CG_CLASS = 4, GAME_CG_BIRTH = 8,
 enum { GAME_MENU_STATS = 1, GAME_MENU_INVENTORY = 2, GAME_MENU_MAGIC = 4, GAME_MENU_MAP = 8,
        GAME_MENU_REST = 16, GAME_MENU_ALL = 31 };
 
+/* an actor living outside its cooked place: a follower or summon that went
+ * to another zone, or something spawned at run time (saved with the game) */
+#define GAME_ROAMERS 64
+
+/* Milestone 7: arrows, bolts, thrown weapons and spell bolts in flight */
+#define GAME_SHOTS 24
+#define GAME_SHOT_GRAVITY 90.0f /* arrows arc a little (spells fly straight) */
+typedef struct {
+    float pos[3], vel[3];
+    float life;                 /* seconds before it fizzles */
+    float gravity;              /* units / s^2 */
+    float strength;             /* weapon shots: how far the bow was drawn */
+    uint32_t weapon, ammo;      /* weapon shots: what was fired */
+    uint32_t source;            /* spell bolts: spell / enchantment hash */
+    const DRpgEffect *effects;  /* spell bolts: the target-range effects */
+    int count;
+    float chance, area;
+    uint32_t shooter_key;
+    int shooter;                /* actor index or AI_TARGET_PLAYER */
+    int mesh;                   /* zone mesh of the ammo, -1 = glowing bolt */
+    uint32_t color;             /* ABGR of a glowing bolt */
+    uint8_t active, harmful, pad[2];
+} GameShot;
+typedef struct {
+    uint32_t key;           /* reference key (stats, inventory, scripts) */
+    uint32_t object;
+    uint32_t zone_entry;    /* zones.dpak entry hash of the zone it is in */
+    float pos[3];
+    float yaw;
+    float life;             /* summons: seconds left, < 0 forever */
+    uint32_t summoner;
+    int32_t summon_effect;
+    DRpgAiPackage pkg;
+    uint8_t ally, has_pkg, pad[2];
+} GameRoamer;
+
 typedef struct Game {
     World *world;
     Zone zone;
@@ -135,6 +171,13 @@ typedef struct Game {
     float light_timer;      /* light loop selection */
     uint32_t light_inst[4]; /* instances with a looping sound (+1, 0 = none) */
     uint32_t light_voice[4];
+    /* Milestone 7: persistence across zones */
+    uint32_t *inst_key;     /* per instance: reference key override (0 = derived) */
+    GameRoamer roam[GAME_ROAMERS];
+    uint32_t roam_count;
+    int loading;            /* load_game: the old zone is not stored */
+    GameShot shots[GAME_SHOTS];
+    uint32_t shots_fired, shots_hit;
 } Game;
 
 #define GAME_NO_TARGET 0xFFFFFFFFu
@@ -174,7 +217,26 @@ void game_talk(Game *g, uint32_t inst);
 /* the player takes count of item from something owned by owner: marks the
  * goods stolen and reports the theft when seen; returns 1 when witnessed */
 int game_theft(Game *g, uint32_t owner, uint32_t item, int32_t count);
+/* places an item (its model) in the zone; instance or -1 */
+int game_spawn_item(Game *g, uint32_t object, const float pos[3], float yaw);
+/* rests or waits; sleeping outdoors can be interrupted by a creature from
+ * the region's sleep list (it appears, hostile). Returns hours passed;
+ * msg gets the interruption notice, the refusal (enemies nearby, 0 hours)
+ * or "". */
+int game_rest(Game *g, int hours, int sleep, char *msg, uint32_t cap);
+/* Projectiles. shooter: AI_TARGET_PLAYER or an actor index; dir need not
+ * be normalised. game_fire_weapon fires the shooter's ranged weapon
+ * (consuming the ammo; strength 0..1 = draw); returns the shot or -1 (no
+ * ranged weapon / ammo). game_fire_spell launches target-range effects. */
+int game_fire_weapon(Game *g, int shooter, const float from[3], const float dir[3], float strength);
+int game_fire_spell(Game *g, int shooter, const float from[3], const float dir[3], uint32_t source,
+                    const DRpgEffect *effects, int count, float chance);
+/* Model matrix of an active shot (the ammo model's +Y along the flight). */
+void game_shot_matrix(const Game *g, uint32_t shot, Mat4 *out);
 /* plays a SOUN id without position (UI, the player's own sounds) */
 void game_sound(Game *g, const char *id);
+/* an actor says its Voice-dialogue line for topic (hello, idle, attack,
+ * hit, flee, thief): recorded voice + subtitle; 1 when something was said */
+int game_voice(Game *g, int actor, const char *topic);
 
 #endif /* PSPWIND_GAME_H */

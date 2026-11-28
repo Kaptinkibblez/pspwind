@@ -487,6 +487,9 @@ def sound_files() -> Dict[str, bytes]:
         "sound/cr/tw/roar.wav": _wav(_synth(0.6, 22050, lambda t, u: 9000 * sine(2 * math.pi * 70 * t) * noise[int(t * 22050)] * (1 - u)), 22050),
         # a voice line: silent MP3 frames (MP3 pass-through path)
         "sound/vo/tw/hello.mp3": _silent_mp3(60),
+        "sound/vo/tw/attack.mp3": _silent_mp3(30),
+        "sound/vo/tw/hit.mp3": _silent_mp3(20),
+        "sound/vo/tw/welcome.mp3": _silent_mp3(80),
     }
     # four-second stereo theme for the explore playlist
     notes = [262, 330, 392, 330, 294, 349, 440, 349]
@@ -591,6 +594,30 @@ def m6_records() -> List[bytes]:
                                     esm.sub("FLAG", struct.pack("<i", 0x8)),
                                     esm.sub("AIDT", bytes([0, 0, 100, 20, 0, 0, 0, 0]) + struct.pack("<I", 0)),
                                     ai_wander(300)]))
+    recs += m7_records()
+    return recs
+
+
+def m7_records() -> List[bytes]:
+    """Milestone 7: voice lines, sleep creatures, a bow and arrows."""
+    recs = []
+    recs.append(dial("Hello", 1))
+    recs += infos("Hello", [{"actor": "tw_guard", "text": "Citizen.", "sound": "Vo\\tw\\hello.mp3"}])
+    recs.append(dial("Attack", 1))
+    recs += infos("Attack", [{"text": "Die!", "sound": "Vo\\tw\\attack.mp3"}])
+    recs.append(dial("Hit", 1))
+    recs += infos("Hit", [{"text": "Argh!", "sound": "Vo\\tw\\hit.mp3"}])
+    recs.append(esm.record("LEVC", [esm.sub("NAME", esm.zs("tw_sleep_creatures")),
+                                    esm.sub("DATA", struct.pack("<i", 1)), esm.sub("NNAM", bytes([0])),
+                                    esm.sub("INDX", struct.pack("<i", 2)),
+                                    esm.sub("CNAM", esm.zs("tw_critter")), esm.sub("INTV", struct.pack("<h", 1)),
+                                    esm.sub("CNAM", esm.zs("tw_snapper")), esm.sub("INTV", struct.pack("<h", 20))]))
+    recs.append(obj("WEAP", "tw_bow", "tw\\crate.nif", "Shore Bow",
+                    extra=[esm.sub("WPDT", struct.pack("<fihHffH6Bi", 6.0, 80, 9, 300, 1.0, 1.0, 0,
+                                                       2, 10, 0, 0, 0, 0, 0))]))
+    recs.append(obj("WEAP", "tw_arrow", "tw\\crate.nif", "Reed Arrow",
+                    extra=[esm.sub("WPDT", struct.pack("<fihHffH6Bi", 0.1, 1, 12, 0, 1.0, 1.0, 0,
+                                                       3, 8, 0, 0, 0, 0, 0))]))
     return recs
 
 
@@ -761,6 +788,8 @@ def infos(topic: str, entries) -> List[bytes]:
                          ("faction", "FNAM"), ("cell", "ANAM"), ("pcfaction", "DNAM")):
             if e.get(key):
                 subs.append(esm.sub(tag, esm.zs(e[key])))
+        if e.get("sound"):
+            subs.append(esm.sub("SNAM", esm.zs(e["sound"])))
         subs.append(esm.sub("NAME", e["text"].encode("latin-1")))
         for rule, value in e.get("selects", ()):
             subs.append(esm.sub("SCVR", rule.encode("latin-1")))
@@ -960,7 +989,8 @@ def rpg_records() -> List[bytes]:
     ])
     recs.append(dial("Greeting 1", 2))
     recs += infos("Greeting 1", [
-        {"actor": E, "text": "Welcome to the hamlet, %PCName. Ask me about the latest rumors."},
+        {"actor": E, "text": "Welcome to the hamlet, %PCName. Ask me about the latest rumors.",
+         "sound": "Vo\\tw\\welcome.mp3"},
         {"actor": G, "text": "Keep the peace, citizen."},
         {"actor": W, "text": "Hello again, %PCName. The %Class of the %Faction greets you."},
     ])
@@ -1031,7 +1061,8 @@ def build_esm() -> List[bytes]:
         esm.record("REGN", [esm.sub("NAME", esm.zs("tw region")),
                             esm.sub("FNAM", esm.zs("Test Coast Region")),
                             esm.sub("CNAM", struct.pack("<I", 0x00406080)),
-                            esm.sub("SNAM", esm.zs("tw waves").ljust(32, b"\0") + bytes([30]))]),
+                            esm.sub("SNAM", esm.zs("tw waves").ljust(32, b"\0") + bytes([30])),
+                            esm.sub("BNAM", esm.zs("tw_sleep_creatures"))]),
         obj("STAT", "tw_house", "tw\\house.nif"),
         obj("STAT", "tw_rock", "tw\\rock.nif"),
         obj("STAT", "tw_tree", "tw\\tree.nif"),

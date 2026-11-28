@@ -366,6 +366,27 @@ static void save_dir_from_data(char *out, size_t n, const char *data_dir)
 
 /* automatic frame pacing: drop to a steady 30 Hz when frames do not fit
  * into one 60 Hz refresh, climb back after two seconds of headroom */
+/* arrows, bolts and spells in flight */
+static void draw_shots(App *a, const Camera *cam)
+{
+    static GfxProp props[GAME_SHOTS];
+    const Game *g = &a->game;
+    uint32_t i, n = 0;
+    for (i = 0; i < GAME_SHOTS; ++i) {
+        const GameShot *s = &g->shots[i];
+        GfxProp *p;
+        if (!s->active)
+            continue;
+        p = &props[n++];
+        p->mesh = s->mesh >= 0 ? &g->zone.meshes[s->mesh] : NULL;
+        game_shot_matrix(g, i, &p->world);
+        memcpy(p->pos, s->pos, sizeof(p->pos));
+        p->size = s->count > 0 ? 18.0f : 6.0f; /* a model-less arrow shows as a small spark */
+        p->color = s->color;
+    }
+    gfx_draw_props(props, n, cam, &a->stats);
+}
+
 static void pace_frames(App *a, float dt)
 {
     float work = (float)gfx_last_work_us();
@@ -490,6 +511,7 @@ static void run(App *a, const char *data_dir)
         if (a->game.zone.hdr) {
             game_camera(&a->game, &cam);
             gfx_draw_zone(&a->game.zone, &a->game.actors, &cam, &a->opt, &a->stats);
+            draw_shots(a, &cam);
         }
         ui_draw(&a->ui, &a->canvas);
         ui_render_gu(&a->canvas);

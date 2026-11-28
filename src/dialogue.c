@@ -613,6 +613,8 @@ static void respond(Dialogue *d, uint32_t info, const char *title, int learn_fir
     if (title && *title)
         history_add(d, DLG_ENTRY_TITLE, title);
     history_add(d, DLG_ENTRY_TEXT, d->fixed);
+    if (in->sound && d->voice)
+        d->voice(d->voice_user, in->sound, &d->actor);
     if (in->script != DRPG_NONE) {
         uint32_t avail = 0;
         const uint8_t *blob = rpgdb_blob(d->db, in->script, &avail);
@@ -747,6 +749,30 @@ static int say_mode(Dialogue *d, const char *topic, int invert)
         }
     }
     return 0;
+}
+
+int dlg_voice_line(Dialogue *d, const VmRef *speaker, int creature, const char *topic, uint32_t *sound,
+                   char *text, uint32_t cap)
+{
+    int t = rpgdb_topic(d->db, pw_hash_name(topic)), info;
+    VmRef keep_actor;
+    int keep_creature;
+    if (t < 0 || d->active || d->db->topics[t].type != DRPG_TT_VOICE)
+        return 0;
+    keep_actor = d->actor;
+    keep_creature = d->creature;
+    d->actor = *speaker;
+    d->creature = creature;
+    info = dlg_search(d, (uint32_t)t, 0, NULL);
+    if (info >= 0) {
+        const DRpgInfo *in = &d->db->infos[info];
+        *sound = in->sound;
+        rpgdb_text(d->db, in->text, d->text, sizeof(d->text));
+        vm_fix_defines(d->vm, '%', d->text, text, cap, &d->actor);
+    }
+    d->actor = keep_actor;
+    d->creature = keep_creature;
+    return info >= 0;
 }
 
 int dlg_service_refused(Dialogue *d)

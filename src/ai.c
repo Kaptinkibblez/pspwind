@@ -10,6 +10,7 @@
 #include "game.h"
 
 #define AI_BODY_RADIUS 28.0f
+#define AI_SHOOT_DIST 1400.0f /* archers keep this far and shoot */
 #define AI_BODY_HEIGHT 128.0f
 #define AI_ARRIVE 56.0f
 #define AI_EYE 110.0f
@@ -669,12 +670,22 @@ static void wander(Game *g, int i, float dt)
         VmRef self = game_actor_ref(g, (uint32_t)i);
         float greet = vm_stat(vm_of(g), &self, MWP_AI_HELLO) * gmst_f(g, "iGreetDistanceMultiplier", 6.0f);
         if (greet > 0.0f && dist2(p, pc) < greet * greet && s->sees_player) {
+            if (!s->greeted) {
+                s->greeted = 1;
+                game_voice(g, i, "hello");
+            }
             stand(g, i);
             face(g, i, pc, dt, 2.5f);
             s->state = AI_IDLE;
             s->timer = PW_MAX(s->timer, 1.0f);
             return;
         }
+    }
+    if (s->greeted && !is_creature(g, i)) {
+        VmRef self = game_actor_ref(g, (uint32_t)i);
+        float far = vm_stat(vm_of(g), &self, MWP_AI_HELLO) * gmst_f(g, "iGreetDistanceMultiplier", 6.0f) * 1.5f;
+        if (dist2(p, pc) > far * far)
+            s->greeted = 0; /* greets again next time */
     }
     if (s->state == AI_WALK) {
         int rc = walk(g, i, dt, 0, AI_ARRIVE);
@@ -720,6 +731,8 @@ static void wander(Game *g, int i, float dt)
     }
     if (!pick_idle(g, i) && a->group != pw_hash_name("idle"))
         actor_play(a, pw_hash_name("idle"), 1);
+    if (!is_creature(g, i) && dist2(p, pc) < 1500.0f * 1500.0f && vm_random01(vm_of(g)) < 0.1f)
+        game_voice(g, i, "idle");
     /* creatures moan now and then */
     if (is_creature(g, i) && vm_random01(vm_of(g)) < 0.15f)
         play_gen(g, i, DRPG_SNDG_MOAN, NULL);
@@ -830,6 +843,8 @@ void ai_start_combat(Game *g, int actor, int target)
     s->lost_timer = 0.0f;
     s->path_len = s->path_pos = 0;
     play_gen(g, actor, DRPG_SNDG_ROAR, NULL);
+    if (target == AI_TARGET_PLAYER)
+        game_voice(g, actor, "attack");
 }
 
 void ai_stop_combat(Game *g, int actor)
@@ -854,6 +869,8 @@ void ai_attacked(Game *g, int actor, int attacker)
         return;
     s = &g->ai.actors[actor];
     play_gen(g, actor, DRPG_SNDG_SCREAM, "Health Damage");
+    if (s->state == AI_COMBAT && vm_random01(vm_of(g)) < 0.3f)
+        game_voice(g, actor, "hit");
     if (s->state == AI_FLEE)
         return;
     if (attacker == AI_TARGET_PLAYER && s->ally) {
@@ -910,7 +927,8 @@ static const DRpgSpell *choose_spell(Game *g, const VmRef *self, int heal)
     return best;
 }
 
-static void cast_at(Game *g, int i, const DRpgSpell *sp, const VmRef *self, const VmRef *tgt, int range)
+static void cast_at(Game *g, int i, const DRpgSpell *sp, const VmRef *self, const VmRef *tgt, int range,
+                    const float at[3])
 {
     Rpg *r = rpg_of(g);
     int n;
@@ -923,7 +941,18 @@ static void cast_at(Game *g, int i, const DRpgSpell *sp, const VmRef *self, cons
         play_sound(g, i, m->sound[0], AUDIO_CAT_EFFECTS);
     if (vm_random01(vm_of(g)) * 100.0f >= chance)
         return;
-    rpg_apply(r, self, tgt, e, n, range, sp->hash, chance, 1);
+    if (range == RPG_RANGE_TARGET && at) {
+        /* a bolt from the caster's hands: it can miss, or hit someone else */
+        const Actor *a = &g->actors.list[i];
+        float from[3] = { a->pos.x, a->pos.y, a->pos.z + 96.0f * a->scale }, dir[3];
+        dir[0] = at[0] - from[0];
+        dir[1] = at[1] - from[1];
+        dir[2] = at[2] + 64.0f - from[2];
+        from[0] += dir[0] > 0.0f ? 1.0f : -1.0f; /* clear of its own body: shots skip the shooter anyway */
+        game_fire_spell(g, i, from, dir, sp->hash, e, n, chance);
+    } else {
+        rpg_apply(r, self, tgt, e, n, range, sp->hash, chance, 1);
+    }
     if (tgt->kind == VM_REF_PLAYER && range == RPG_RANGE_TARGET) {
         char buf[80];
         snprintf(buf, sizeof(buf), "%s casts %s at you.", game_instance_name(g, g->actors.list[i].instance),
@@ -959,6 +988,45 @@ static void strike(Game *g, int i, const VmRef *self, const VmRef *tgt, int targ
     }
 }
 
+/* a ranged weapon with something to fire */
+static int can_shoot(Game *g, const VmRef *self)
+{
+    Rpg *r = rpg_of(g);
+    uint32_t weapon, ammo;
+    const DRpgObject *w;
+    if (!rpg_shot_items(r, self, &weapon, &ammo))
+        return 0;
+    w = rpg_object(r, weapon);
+    return ammo != 0 || (w && w->stat[0] == 11);
+}
+
+static void shoot(Game *g, int i, const VmRef *self, const float t[3])
+{
+    Rpg *r = rpg_of(g);
+    const Actor *a = &g->actors.list[i];
+    uint32_t weapon, ammo;
+    const DRpgObject *w;
+    float from[3] = { a->pos.x, a->pos.y, a->pos.z + 100.0f * a->scale }, v[3], dist, speed, time;
+    rpg_shot_items(r, self, &weapon, &ammo);
+    w = rpg_object(r, weapon);
+    speed = w && w->stat[0] == 11 ? rpg_gmst_f(r, "fThrownWeaponMaxSpeed", 1000.0f)
+                                   : rpg_gmst_f(r, "fProjectileMaxSpeed", 3000.0f);
+    v[0] = t[0] - from[0];
+    v[1] = t[1] - from[1];
+    v[2] = t[2] + 64.0f - from[2];
+    dist = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    time = dist / PW_MAX(1.0f, speed);
+    if (time > 1e-3f) {
+        /* velocity that reaches the chest after the drop */
+        v[0] /= time;
+        v[1] /= time;
+        v[2] = v[2] / time + 0.5f * GAME_SHOT_GRAVITY * time;
+    }
+    actor_play(&g->actors.list[i], pw_hash_name("attack1"), 0);
+    play_sound(g, i, pw_hash_name("Weapon Swish"), AUDIO_CAT_EFFECTS);
+    game_fire_weapon(g, i, from, v, 1.0f);
+}
+
 static int nearest_enemy_of_player(Game *g, int self)
 {
     uint32_t k;
@@ -985,7 +1053,8 @@ static void combat(Game *g, int i, float dt, int thinking)
     AiActor *s = &g->ai.actors[i];
     Rpg *r = rpg_of(g);
     VmRef self = game_actor_ref(g, (uint32_t)i), tgt;
-    float p[3], t[3], d, reach;
+    float p[3], t[3], d, reach, melee;
+    int ranged, los = 1;
     actor_xyz(g, i, p);
     if (!target_xyz(g, s->target, t, &tgt)) {
         if (s->target == AI_TARGET_PLAYER)
@@ -996,7 +1065,11 @@ static void combat(Game *g, int i, float dt, int thinking)
         return;
     }
     d = sqrtf(dist2(p, t));
-    reach = rpg_weapon_reach(r, &self) + AI_BODY_RADIUS * 2.0f;
+    melee = rpg_weapon_reach(r, &self) + AI_BODY_RADIUS * 2.0f;
+    ranged = can_shoot(g, &self);
+    reach = ranged ? AI_SHOOT_DIST : melee;
+    if (ranged && d <= reach)
+        los = clear_line(g, p, t);
     if (rpg_effect(r, &self, MGEF_PARALYZE, -1) > 0.0f)
         return;
     /* give up on a target that stays far away */
@@ -1016,40 +1089,46 @@ static void combat(Game *g, int i, float dt, int thinking)
             s->state = AI_FLEE;
             s->fled = 1;
             s->timer = 6.0f;
+            game_voice(g, i, "flee");
             return;
         }
         /* heal or cast from range */
         if (s->spell_timer <= 0.0f && !is_creature(g, i)) {
             const DRpgSpell *sp = hp < 0.4f ? choose_spell(g, &self, 1) : NULL;
             if (sp) {
-                cast_at(g, i, sp, &self, &self, RPG_RANGE_SELF);
+                cast_at(g, i, sp, &self, &self, RPG_RANGE_SELF, NULL);
                 s->spell_timer = 3.0f;
-            } else if (d > reach * 1.5f && d < 2000.0f && clear_line(g, p, t)) {
+            } else if (d > melee * 1.5f && d < 2000.0f && clear_line(g, p, t)) {
                 sp = choose_spell(g, &self, 0);
                 if (sp) {
-                    cast_at(g, i, sp, &self, &tgt, RPG_RANGE_TARGET);
+                    cast_at(g, i, sp, &self, &tgt, RPG_RANGE_TARGET, t);
                     s->spell_timer = 2.5f + vm_random01(vm_of(g));
                 }
             }
         }
     }
     s->spell_timer -= dt;
-    if (d > reach * 0.9f) {
+    if (d > reach * 0.9f || !los) {
         if (s->path_len == 0 || dist2(s->dest, t) > 300.0f * 300.0f) {
             plan(g, i, t);
             if (clear_line(g, p, t))
                 s->path_len = 0; /* straight at it */
         }
         memcpy(s->dest, t, sizeof(s->dest));
-        walk(g, i, dt, 1, reach * 0.8f);
+        walk(g, i, dt, 1, los ? reach * 0.8f : 64.0f);
     } else {
         stand(g, i);
         face(g, i, t, dt, 6.0f);
     }
     s->attack_timer -= dt;
-    if (d <= reach && s->attack_timer <= 0.0f) {
-        strike(g, i, &self, &tgt, s->target);
-        s->attack_timer = 1.2f + 0.8f * vm_random01(vm_of(g));
+    if (d <= reach && los && s->attack_timer <= 0.0f) {
+        if (ranged) {
+            shoot(g, i, &self, t);
+            s->attack_timer = 1.6f + 0.8f * vm_random01(vm_of(g));
+        } else {
+            strike(g, i, &self, &tgt, s->target);
+            s->attack_timer = 1.2f + 0.8f * vm_random01(vm_of(g));
+        }
     }
 }
 
@@ -1202,19 +1281,33 @@ void ai_update(Game *g, float dt)
 /* ------------------------------------------------------------------------ */
 /* crime                                                                    */
 /* ------------------------------------------------------------------------ */
-void ai_mark_stolen(Game *g, uint32_t item, int32_t count)
+void ai_mark_stolen(Game *g, uint32_t item, uint32_t owner, int32_t count)
 {
     AiState *ai = &g->ai;
     uint32_t k;
     for (k = 0; k < ai->stolen_used; ++k)
-        if (ai->stolen_item[k] == item) {
+        if (ai->stolen_item[k] == item && ai->stolen_owner[k] == owner) {
             ai->stolen_count[k] += count;
             return;
         }
     if (ai->stolen_used < AI_STOLEN_MAX) {
         ai->stolen_item[ai->stolen_used] = item;
+        ai->stolen_owner[ai->stolen_used] = owner;
         ai->stolen_count[ai->stolen_used++] = count;
     }
+}
+
+int32_t ai_stolen_from(Game *g, uint32_t item, uint32_t owner)
+{
+    AiState *ai = &g->ai;
+    Vm *vm = vm_of(g);
+    int32_t have, n = 0;
+    uint32_t k;
+    for (k = 0; k < ai->stolen_used; ++k)
+        if (ai->stolen_item[k] == item && ai->stolen_owner[k] == owner)
+            n += ai->stolen_count[k];
+    have = vm_item_count(vm, vm->player_hash, item);
+    return PW_MIN(n, have);
 }
 
 int ai_crime(Game *g, int type, int victim, uint32_t owner, int value)
@@ -1255,6 +1348,8 @@ int ai_crime(Game *g, int type, int victim, uint32_t owner, int value)
         if (!sees)
             continue;
         witnessed = 1;
+        if (type == AI_CRIME_THEFT || type == AI_CRIME_PICKPOCKET)
+            game_voice(g, (int)i, "thief");
         if (ai_is_guard(g, (int)i) && g->ai.actors[i].state != AI_COMBAT) {
             g->ai.actors[i].state = AI_PURSUE;
             g->ai.actors[i].greet_timer = 0.0f;
@@ -1338,28 +1433,32 @@ void ai_go_to_jail(Game *g)
 /* ------------------------------------------------------------------------ */
 /* spawning                                                                 */
 /* ------------------------------------------------------------------------ */
-int ai_spawn(Game *g, uint32_t object, const float pos[3], float yaw, int ally, float life)
+int ai_spawn(Game *g, uint32_t object, const float pos[3], float yaw, int ally, float life, uint32_t key)
 {
     Rpg *r = rpg_of(g);
     const DRpgObject *o = rpg_object(r, object);
-    uint32_t rec, skel;
+    DActorTemplate t;
+    uint32_t rec;
     int inst, idx;
     float p[3];
     VmRef ref;
-    if (!o || o->type != DRPG_OT_CREA || !g->ai.actors)
+    if (!o || (o->type != DRPG_OT_CREA && o->type != DRPG_OT_NPC) || !g->ai.actors ||
+        zone_load_template(g->world, object, &t) != 0)
         return -1;
-    skel = (o->link[0] && pak_find(&g->world->meshes, o->link[0])) ? o->link[0] : o->model;
     memcpy(p, pos, sizeof(p));
     {
         float ground;
         if (phys_ground(&g->phys, p[0], p[1], p[2] + 128.0f, &ground) && ground > p[2] - 512.0f)
             p[2] = ground;
     }
-    inst = zone_spawn_creature(g->world, &g->zone, object, skel, o->link[0], p, yaw, 1.0f, &rec);
+    inst = zone_spawn_actor(g->world, &g->zone, object, &t,
+                            o->type == DRPG_OT_CREA ? DZONE_INST_CREATURE : DZONE_INST_NPC, p, yaw, 1.0f, &rec);
     if (inst < 0)
         return -1;
     /* a game-wide serial keeps spawned references apart across zone visits */
     g->zone.inst_rw[inst].refnum = ZONE_SPAWN_REFNUM | (++g->ai.spawn_serial & 0xFFFFFFu);
+    if (g->inst_key)
+        g->inst_key[inst] = key;
     idx = actor_spawn(&g->actors, &g->zone, rec);
     if (idx < 0 || (uint32_t)idx >= g->ai.capacity) {
         g->zone.inst_hidden[inst] = 1;
@@ -1374,6 +1473,10 @@ int ai_spawn(Game *g, uint32_t object, const float pos[3], float yaw, int ally, 
     g->ai.actors[idx].ally = (uint8_t)ally;
     g->ai.actors[idx].life = life;
     g->ai.spawned++;
+    if (rpg_is_dead(r, &ref)) {
+        actor_play(&g->actors.list[idx], pw_hash_name("death1"), 0);
+        g->actors.list[idx].time = 60.0f;
+    }
     return idx;
 }
 

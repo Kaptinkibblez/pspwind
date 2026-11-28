@@ -19,8 +19,10 @@
  *     RPGS mechanics state (effects, equipment, player-made objects,
  *          character, mark, explored cells)
  *     GAME zone, player body and view, controls, menus
- *     AIST stolen goods, spawn serial, every actor of the current zone
- *          (position, state, package, spawned creatures)
+ *     AIST stolen goods (item, count, owner), spawn serial, every actor of the current zone
+ *          (identity key, position, state, package, spawned actors)
+ *     ROAM actors living away from their cooked place (followers that
+ *          went to other zones, spawned actors of other zones)
  *
  * Files are written to <slot>.tmp and renamed over the old one, so a power
  * loss never leaves a half-written save. Loading validates the header, the
@@ -35,7 +37,7 @@
 
 #define SAVE_SLOTS 8
 #define SAVE_MAGIC 0x56415344u /* "DSAV" */
-#define SAVE_VERSION 1
+#define SAVE_VERSION 2
 
 typedef struct {
     uint32_t magic;

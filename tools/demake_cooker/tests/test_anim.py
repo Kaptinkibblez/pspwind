@@ -128,6 +128,24 @@ class ActorWorldTests(unittest.TestCase):
             self.assertEqual(ins["kind"], dzone.INST_NPC)
             self.assertTrue(ins["flags"] & dzone.IF_ACTOR)
 
+    def test_actor_templates(self):
+        import struct as st
+        guard = self.zones.get("actor/tw_guard")
+        vals = st.unpack(dzone.ACTOR_TEMPLATE_FMT, guard)
+        self.assertEqual(vals[:2], (dzone.ACTOR_TEMPLATE_MAGIC, 1))
+        self.assertEqual(self.meshes.find_hash(vals[3]), "base_anim")
+        self.assertEqual(self.anims.find_hash(vals[4]), "xbase_anim")
+        count = vals[5 + 32]
+        meshes = [self.meshes.find_hash(vals[5 + 2 * i]) for i in range(count)]
+        self.assertIn("tw/b_folk_chest", meshes)
+        hands = [i for i in range(count) if meshes[i] == "tw/b_folk_hand"]
+        mirror = vals[5 + 33]
+        self.assertEqual([bool(mirror & (1 << i)) for i in hands], [False, True])
+        critter = st.unpack(dzone.ACTOR_TEMPLATE_FMT, self.zones.get("actor/tw_critter"))
+        self.assertEqual(critter[2], dzone.ACTOR_F_CREATURE)
+        self.assertEqual(self.meshes.find_hash(critter[3]), "tw/xcritter")
+        self.assertEqual(critter[5 + 32], 0)
+
     def test_posed_npc_stands_on_its_feet(self):
         import world_demaker as W
         z = dzone.read_zone(self.zones.get("zone/ext_0_0"))

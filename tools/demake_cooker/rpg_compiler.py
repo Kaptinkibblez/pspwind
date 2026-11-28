@@ -752,6 +752,7 @@ class RpgBuilder:
             icon = tex or icon
             l2 = self._list(self._spell_list(rec))
         elif t == "REGN":
+            link[0] = _h(zs(rec.get("BNAM")))  # sleep creature (leveled list)
             # ambient sounds: (sound id, chance %)
             l2 = self._list([(esm.zstr(d[:32]), d[32] if len(d) > 32 else 0)
                              for n, d in rec.subs if n == "SNAM" and len(d) >= 32])
@@ -1134,7 +1135,7 @@ class RpgBuilder:
                 self.warnings.append(f"INFO {info['id']}: result script: {e}")
             if comp is not None:
                 script_sid = self.blobs.add(comp.snippet_blob())
-        sound = _h(info["sound"].lower().replace("\\", "/")) if info["sound"] else 0
+        sound = _h(dmcommon.sound_key(info["sound"])) if info["sound"] else 0  # music.dpak voice entry
         return (text_sid, script_sid, sound, first, len(self.conds) - first, flags, 0, info["disp"])
 
     def _cond(self, func: int, comp: int, key: int, value) -> None:

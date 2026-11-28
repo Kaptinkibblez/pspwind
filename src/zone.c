@@ -529,26 +529,30 @@ uint32_t zone_anim_index(World *w, Zone *z, uint32_t hash)
     return z->anim_count++;
 }
 
-int zone_spawn_creature(World *w, Zone *z, uint32_t object_hash, uint32_t skel_hash, uint32_t anim_hash,
-                        const float pos[3], float yaw, float scale, uint32_t *rec_out)
+int zone_load_template(World *w, uint32_t object_hash, DActorTemplate *out)
+{
+    const DPakEntry *e = pak_find(&w->zones, object_hash ^ DACT_SALT);
+    if (!e || e->size != sizeof(DActorTemplate) || pak_read(&w->zones, e, out) != 0)
+        return -1;
+    if (out->magic != DACT_MAGIC || out->version != 1 || out->part_count > DZONE_ACTOR_MAX_PARTS)
+        return -1;
+    return 0;
+}
+
+/* a new instance slot at the end of the runtime table */
+static DZoneInstance *new_instance(Zone *z, uint32_t object_hash, uint8_t kind, uint8_t flags, int mesh,
+                                   const float pos[3], float yaw, float scale, uint32_t *index)
 {
     DZoneInstance *in;
-    DZoneActor *rec;
-    int mesh;
-    uint32_t inst, anim;
-    if (!z->hdr || z->instance_count >= z->hdr->instance_count + ZONE_SPAWN_SLOTS ||
-        z->actor_rec_count >= z->hdr->actor_count + ZONE_SPAWN_SLOTS)
-        return -1;
-    mesh = skel_hash ? zone_mesh_index(w, z, skel_hash) : -1;
-    if (mesh < 0)
-        return -1;
-    anim = anim_hash ? zone_anim_index(w, z, anim_hash) : DZONE_NONE;
+    uint32_t inst;
+    if (!z->hdr || z->instance_count >= z->hdr->instance_count + ZONE_SPAWN_SLOTS)
+        return NULL;
     inst = z->instance_count;
     in = &z->inst_rw[inst];
     memset(in, 0, sizeof(*in));
-    in->mesh = (uint16_t)mesh;
-    in->kind = DZONE_INST_CREATURE;
-    in->flags = DZONE_IF_ACTOR;
+    in->mesh = mesh >= 0 ? (uint16_t)mesh : DZONE_NONE;
+    in->kind = kind;
+    in->flags = flags;
     in->door = DZONE_NONE;
     in->object_hash = object_hash;
     in->refnum = ZONE_SPAWN_REFNUM | (++z->spawn_serial & 0xFFFFFFu);
@@ -559,18 +563,71 @@ int zone_spawn_creature(World *w, Zone *z, uint32_t object_hash, uint32_t skel_h
     in->bound[1] = pos[1];
     in->bound[2] = pos[2] + 64.0f * in->scale;
     in->bound[3] = 96.0f * in->scale;
+    if (mesh >= 0 && z->meshes[mesh].hdr && !(flags & DZONE_IF_ACTOR)) {
+        /* items: the model's own bounding sphere, placed */
+        const DMeshHeader *mh = z->meshes[mesh].hdr;
+        in->bound[2] = pos[2] + mh->bound_center[2] * in->scale;
+        in->bound[3] = PW_MAX(16.0f, mh->bound_radius * in->scale);
+    }
     zone_placement_matrix(&z->inst_world[inst], in->pos, in->rot, in->scale);
     z->inst_hidden[inst] = 0;
     z->inst_scratch[inst] = 0;
+    *index = inst;
+    z->instance_count++;
+    return in;
+}
+
+int zone_spawn_actor(World *w, Zone *z, uint32_t object_hash, const DActorTemplate *t, uint8_t kind,
+                     const float pos[3], float yaw, float scale, uint32_t *rec_out)
+{
+    DZoneActor *rec;
+    uint32_t inst, anim, k, *bones;
+    int mesh, parts[DZONE_ACTOR_MAX_PARTS];
+    if (!z->hdr || z->actor_rec_count >= z->hdr->actor_count + ZONE_SPAWN_SLOTS)
+        return -1;
+    mesh = zone_mesh_index(w, z, t->skeleton);
+    if (mesh < 0)
+        return -1;
+    for (k = 0; k < t->part_count; ++k)
+        parts[k] = zone_mesh_index(w, z, t->parts[k].mesh);
+    anim = t->anim ? zone_anim_index(w, z, t->anim) : DZONE_NONE;
+    bones = (uint32_t *)mem_try_alloc(MEM_REGION_ZONE, DZONE_ACTOR_MAX_PARTS * sizeof(uint32_t), 4);
+    if (!bones || (const uint8_t *)bones < z->base)
+        return -1;
+    if (!new_instance(z, object_hash, kind, DZONE_IF_ACTOR, mesh, pos, yaw, scale, &inst))
+        return -1;
     rec = &z->actor_rw[z->actor_rec_count];
     memset(rec, 0, sizeof(*rec));
     rec->instance = inst;
     rec->skeleton = (uint16_t)mesh;
     rec->anim = (uint16_t)anim;
-    rec->flags = DZONE_ACTOR_F_CREATURE;
-    rec->part_bone_ofs = 0;
+    rec->flags = t->flags;
+    /* body parts that failed to load are dropped (the rest still draws) */
+    for (k = 0; k < t->part_count; ++k) {
+        if (parts[k] < 0)
+            continue;
+        if (t->part_flags & (1u << k))
+            rec->part_flags |= 1u << rec->part_count;
+        bones[rec->part_count] = t->parts[k].bone;
+        rec->parts[rec->part_count++] = (uint16_t)parts[k];
+    }
+    rec->part_bone_ofs = (uint32_t)((const uint8_t *)bones - z->base);
     *rec_out = z->actor_rec_count++;
-    z->instance_count++;
+    return (int)inst;
+}
+
+int zone_spawn_item(World *w, Zone *z, uint32_t object_hash, uint32_t mesh_hash, const float pos[3], float yaw,
+                    float scale)
+{
+    uint32_t inst;
+    int mesh = mesh_hash ? zone_mesh_index(w, z, mesh_hash) : -1;
+    if (mesh < 0)
+        return -1;
+    if (!new_instance(z, object_hash, DZONE_INST_ITEM, 0, mesh, pos, yaw, scale, &inst))
+        return -1;
+#if PW_PSP
+    sceKernelDcacheWritebackAll();
+#endif
     return (int)inst;
 }
 

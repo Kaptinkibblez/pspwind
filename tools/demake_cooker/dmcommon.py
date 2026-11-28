@@ -365,20 +365,32 @@ DPAK_HEADER_FMT = "<4sHHIIII8x"  # 32 bytes
 DPAK_ENTRY_FMT = "<IIII"  # 16 bytes
 
 
+ACTOR_TEMPLATE_SALT = 0x41C7A2E5
+
+
+def entry_hash(name: str) -> int:
+    """Directory hash of a pack entry: pw_hash_name(name), except actor
+    templates ("actor/<id>"), keyed pw_hash_name(id) ^ ACTOR_TEMPLATE_SALT so
+    the runtime finds them from an object id hash alone."""
+    if name.startswith("actor/"):
+        return fnv1a32(name[6:]) ^ ACTOR_TEMPLATE_SALT
+    return fnv1a32(name)
+
+
 class DPakWriter:
     def __init__(self, kind: int) -> None:
         self.kind = kind
         self.items: Dict[str, bytes] = {}
 
     def add(self, name: str, data: bytes) -> None:
-        h = fnv1a32(name)
+        h = entry_hash(name)
         for other in self.items:
-            if other != name and fnv1a32(other) == h:
+            if other != name and entry_hash(other) == h:
                 raise ValueError(f"DPAK hash collision: {name!r} vs {other!r}")
         self.items[name] = data
 
     def build(self) -> bytes:
-        entries = sorted(self.items.items(), key=lambda kv: fnv1a32(kv[0]))
+        entries = sorted(self.items.items(), key=lambda kv: entry_hash(kv[0]))
         names = StringTable()
         name_ofs = [names.add(n) for n, _ in entries]
         w = BinWriter()
@@ -390,7 +402,7 @@ class DPakWriter:
         for (name, data), nofs in zip(entries, name_ofs):
             w.align(DPAK_ENTRY_ALIGN)
             ofs = w.bytes(data)
-            records.append((fnv1a32(name), ofs, len(data), nofs))
+            records.append((entry_hash(name), ofs, len(data), nofs))
         for i, rec in enumerate(records):
             w.patch(dir_ofs + 16 * i, "IIII", *rec)
         w.patch(0, "4sHHIIII8x", DPAK_MAGIC, DPAK_VERSION, self.kind, len(records),
@@ -422,7 +434,7 @@ class DPakReader:
             prev_hash = h
             start = names_ofs + nofs
             name = data[start:data.index(b"\0", start)].decode("latin-1")
-            if fnv1a32(name) != h:
+            if entry_hash(name) != h:
                 raise ValueError(f"DPAK hash mismatch for {name}")
             if ofs % DPAK_ENTRY_ALIGN:
                 raise ValueError("DPAK entry misaligned")

@@ -116,6 +116,10 @@ int rpg_sell(Rpg *r, const VmRef *npc, int stack, int count, char *msg, uint32_t
         snprintf(msg, cap, "%s", rpgdb_gmst_string(r->db, "sBarterDialog4", "I don't trade in that."));
         return 0;
     }
+    if (r->host.refuses && r->host.refuses(r->host.user, npc, it->item)) {
+        snprintf(msg, cap, "%s", "I won't buy back what was stolen from me.");
+        return 0;
+    }
     gold = rpg_merchant_gold(r, npc);
     price = rpg_price(r, npc, rpg_item_value(r, it), 0) * count;
     if (gold < price) {

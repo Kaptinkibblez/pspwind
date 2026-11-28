@@ -111,8 +111,8 @@ class CookTests(unittest.TestCase):
         self.assertEqual(r["scripts"], 4)
         self.assertEqual(r["script_errors"], {})
         self.assertEqual(r["quests"], 1)
-        self.assertEqual(r["dialogues"], 16)  # 7 topics + 9 Persuasion-type
-        self.assertEqual(r["infos"], 31)  # + the guard's greetings and crime answers
+        self.assertEqual(r["dialogues"], 19)  # 7 topics + 9 Persuasion-type + 3 Voice
+        self.assertEqual(r["infos"], 34)  # + the guard's greetings and crime answers, voices
         self.assertEqual(r["result_script_failures"], 0)
         self.assertGreater(r["script_warnings"], 0)  # the deliberately broken script
 
@@ -345,6 +345,25 @@ class CookTests(unittest.TestCase):
     def test_prison_marker(self):
         kinds = sorted(m[5] for m in self.core["markers"])
         self.assertEqual(kinds, [0, 2])
+
+
+    # ------------------------------------------------ Milestone 7
+    def test_voice_files(self):
+        t = self.core["topics"][self.topic("hello")]
+        self.assertEqual(t[2], R.TT_VOICE)
+        info = self.core["infos"][t[4]]
+        self.assertEqual(info[2], dmcommon.fnv1a32("sound/vo/tw/hello"))  # same key as music.dpak
+        greet = self.core["topics"][self.topic("greeting 1")]
+        voiced = [i[2] for i in self.core["infos"][greet[4]:greet[4] + greet[5]] if i[2]]
+        self.assertEqual(voiced, [dmcommon.fnv1a32("sound/vo/tw/welcome")])
+
+    def test_region_sleep_list(self):
+        region = self.obj("tw region")
+        self.assertEqual(region[10], dmcommon.fnv1a32("tw_sleep_creatures"))
+        lev = self.obj("tw_sleep_creatures")
+        self.assertEqual(lev[2], R.OT["LEVC"])
+        entries = self.core["lists"][lev[15]:lev[15] + lev[13]]
+        self.assertEqual(entries, [(dmcommon.fnv1a32("tw_critter"), 1), (dmcommon.fnv1a32("tw_snapper"), 20)])
 
 
 class LoadOrderTests(unittest.TestCase):

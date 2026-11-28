@@ -63,6 +63,17 @@ void gfx_begin_frame(uint32_t clear_abgr);
 /* actors may be NULL */
 void gfx_draw_zone(const Zone *z, const ActorSet *actors, const Camera *cam,
                    const GfxOptions *opt, GfxStats *stats);
+/* Small moving things drawn after the zone (projectiles): a model with
+ * its world matrix, or (mesh NULL) a glowing diamond of size units at pos.
+ * color is ABGR. */
+typedef struct {
+    const ZoneMesh *mesh;
+    Mat4 world;
+    float pos[3];
+    float size;
+    uint32_t color;
+} GfxProp;
+void gfx_draw_props(const GfxProp *props, uint32_t count, const Camera *cam, GfxStats *stats);
 /* Finishes the display list, waits for the GE, lets the caller draw debug
  * text into the finished frame (overlay may be NULL) and flips at vblank. */
 void gfx_end_frame(void (*overlay)(void *user), void *user);

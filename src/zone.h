@@ -106,11 +106,16 @@ int zone_load(World *w, Zone *z, uint32_t zi, char *err, uint32_t errlen);
  * zone does not have it yet. -1 (mesh) or DZONE_NONE (anim) when missing. */
 int zone_mesh_index(World *w, Zone *z, uint32_t hash);
 uint32_t zone_anim_index(World *w, Zone *z, uint32_t hash);
-/* Places a creature (skeleton mesh + clip by hash) as a new instance with
- * its own actor record; returns the instance or -1 (no slot / no mesh).
- * *rec_out receives the actor record index. */
-int zone_spawn_creature(World *w, Zone *z, uint32_t object_hash, uint32_t skel_hash, uint32_t anim_hash,
-                        const float pos[3], float yaw, float scale, uint32_t *rec_out);
+/* actor/<id> template of an object (zones.dpak); 0 on success */
+int zone_load_template(World *w, uint32_t object_hash, DActorTemplate *out);
+/* Places an actor assembled from its template as a new instance with its
+ * own actor record (meshes and clip loaded on demand); returns the
+ * instance or -1. *rec_out receives the actor record index. */
+int zone_spawn_actor(World *w, Zone *z, uint32_t object_hash, const DActorTemplate *t, uint8_t kind,
+                     const float pos[3], float yaw, float scale, uint32_t *rec_out);
+/* Places an item instance with its model; returns the instance or -1. */
+int zone_spawn_item(World *w, Zone *z, uint32_t object_hash, uint32_t mesh_hash, const float pos[3], float yaw,
+                    float scale);
 /* Ground height under (x, y) from the terrain patches (same triangulation as
  * the renderer). Returns 0 when no patch covers the point. */
 int zone_terrain_height(const Zone *z, float x, float y, float *h);

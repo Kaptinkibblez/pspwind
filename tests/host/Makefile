@@ -38,6 +38,9 @@ ui_test: ui_test.c $(CORE) $(GAME_SRC) $(UI_SRC) $(HDRS)
 save_test: save_test.c $(CORE) $(GAME_SRC) $(HDRS)
 	$(HOSTCC) $(CFLAGS) -o $@ save_test.c $(CORE) $(GAME_SRC) $(LDLIBS)
 
+persist_test: persist_test.c $(CORE) $(GAME_SRC) $(HDRS)
+	$(HOSTCC) $(CFLAGS) -o $@ persist_test.c $(CORE) $(GAME_SRC) $(LDLIBS)
+
 ai_test: ai_test.c $(CORE) $(GAME_SRC) $(HDRS)
 	$(HOSTCC) $(CFLAGS) -o $@ ai_test.c $(CORE) $(GAME_SRC) $(LDLIBS)
 
@@ -58,16 +61,17 @@ $(BUILD)/testworld/data/zones.dpak: $(wildcard $(COOKER)/*.py)
 	$(PYTHON) $(COOKER)/make_testworld.py --out $(BUILD)/testworld
 	$(PYTHON) $(COOKER)/cook_all.py --data "$(BUILD)/testworld/Data Files" --out $(BUILD)/testworld/data --jobs 2
 
-world: world_test game_test rpg_test mech_test audio_test ai_test save_test ui_test $(BUILD)/testworld/data/zones.dpak
+world: world_test game_test rpg_test mech_test audio_test ai_test persist_test save_test ui_test $(BUILD)/testworld/data/zones.dpak
 	./world_test $(BUILD)/testworld/data --expect-testworld
 	./rpg_test $(BUILD)/testworld/data
 	./mech_test $(BUILD)/testworld/data
 	./audio_test $(BUILD)/testworld/data
 	./ai_test $(BUILD)/testworld/data
+	./persist_test $(BUILD)/testworld/data $(BUILD)
 	./save_test $(BUILD)/testworld/data $(BUILD)
 	mkdir -p $(BUILD)/screens
 	./ui_test $(BUILD)/testworld/data $(BUILD)/screens
 	./game_test $(BUILD)/testworld/data
 
 clean:
-	rm -f host_tests world_test game_test rpg_test mech_test audio_test ai_test save_test ui_test
+	rm -f host_tests world_test game_test rpg_test mech_test audio_test ai_test persist_test save_test ui_test

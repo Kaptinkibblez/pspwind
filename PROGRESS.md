@@ -7,7 +7,149 @@
 | 3 | `phys.c` collision, controls, doors/zone transitions, segmented-limb animation | Done |
 | 4 | `rpg_compiler.py`, MWScript VM (`vm.c`), dialogue + journal UI (`ui.c`) | Done |
 | 5 | Combat, magic, inventory/barter/loot UI, character creation, levelling (`rpg.c`) | Done |
-| 6 | AI (`ai.c`), audio mixer (`audio.c`), save/load (`save.c`), 30/60 FPS pass | **Done – awaiting review** |
+| 6 | AI (`ai.c`), audio mixer (`audio.c`), save/load (`save.c`), 30/60 FPS pass | Done |
+| 7 | World persistence and presence: spawning any actor/item, actors keeping their place, followers through doors, dialogue voices, projectiles, rest interruption, stolen goods per owner | **Done – awaiting review** |
+
+## Milestone 7 — delivered
+
+Milestone 7 was not in the original six-milestone plan. It closes the gaps
+that Milestone 6 listed as deferred.
+
+### Cooker
+* `world_demaker.py` writes an **actor template** (`DActorTemplate`) for
+  every NPC and creature as a `zones.dpak` entry `actor/<id>`: flags,
+  skeleton, clip and up to 16 body parts with attachment bones and mirror
+  bits. It is assembled by the same code that cooks placed actors
+  (`assemble_actor`). Template entries use a salted hash, so an id cannot
+  collide with a zone or world entry of the same name.
+* `rpg_compiler.py`:
+  * INFO records carry their voice file (`Vo\...mp3` → the `music.dpak`
+    key).
+  * REGN `link[0]` holds the sleep-creature leveled list (BNAM).
+* `gen_mwfuncs.py` adds stat-store properties for remembered actor
+  positions (`PLACED`, `POSX/Y/Z`, `POSROT`).
+
+### Runtime
+* **Spawning anything.**
+  * `ai_spawn` builds NPCs and creatures alike from their template; meshes,
+    clips and the skeleton are loaded on demand into spare zone slots.
+  * `game_spawn_item` places items with their model.
+  * `PlaceAtPC`/`PlaceAtMe` and summons use these.
+  * A spawned actor can be given an existing identity (reference key), so
+    one actor stays the same individual in every zone.
+* **Actors keep their place.**
+  * When the player leaves a zone, cooked actors store their position and
+    facing in the VM stat store, so they are where they were left on
+    return, and after a save.
+  * Spawned or visiting actors go to a 64-entry **roaming table**: key,
+    object, home zone, position, life, ally, summoner, package.
+* **Followers and summons travel.**
+  * Allies with a lifetime, and actors following the player, travel with
+    the player through doors and zone borders when within 2000 units.
+    They appear behind the player.
+  * A follower who stays behind lives on in that zone. Its cooked
+    original is hidden at home until it returns, so it is never in two
+    places.
+  * The roaming table is saved (`ROAM` section, save version 2).
+* **Voices.**
+  * A dialogue response plays its recorded voice at the speaker.
+  * Voice-type lines (Hello, Idle, Attack, Hit, Flee, Thief) are chosen by
+    the normal dialogue filters (`dlg_voice_line`) and spoken with a
+    subtitle. Triggers:
+    * Hello when an NPC greets the player.
+    * Idle at random while near the player.
+    * Attack when an NPC starts a fight with the player.
+    * Hit when an NPC is struck in a fight.
+    * Flee when it runs.
+    * Thief when it witnesses a theft.
+  * One line per speaker at a time.
+* **Projectiles.**
+  * Arrows, bolts and thrown weapons fly with Morrowind's speeds
+    (`fProjectileMin/MaxSpeed`, `fThrownWeaponMin/MaxSpeed`, scaled by the
+    draw) and a slight arc.
+  * Target-range spells fly as glowing bolts coloured by school
+    (`fTargetSpellMaxSpeed` × effect speed).
+  * Each shot is tested per frame against actors, the player and the
+    collision mesh. Weapon shots resolve with the weapon and ammo they were
+    fired with (`rpg_attack_shot`):
+    * no wear on the launcher;
+    * enchanted ammo strikes once;
+    * a hit may leave the arrow in the victim's inventory
+      (`fProjectileThrownStoreChance`).
+  * Spell bolts apply their effects to the actor they hit, then the area
+    effect where they burst (on a wall too).
+  * Player shots count as assault, like melee.
+  * NPC archers keep 1400 units away, move for a clear line of fire, lead
+    the drop and use their own ammunition; they fight in melee when it runs
+    out.
+  * NPC target spells are bolts too, so they can miss or hit someone else.
+  * Drawn as the ammo's model aligned with the flight, or as an additive
+    camera-facing glow (`gfx_draw_props`).
+* **Rest interruption.**
+  * Sleeping outdoors in a region with a sleep list has an `fSleepRandMod`
+    chance (0.25) per rest of being woken after a random number of hours.
+  * A creature from the leveled list (`rpg_leveled`: chance none, all
+    levels, nested lists) then appears beside the player, hostile, with
+    "Your rest has been interrupted."
+  * Waiting is never interrupted.
+  * Resting is refused with enemies nearby, even when the rest is started
+    outside the menu (`game_rest`).
+* **Stolen goods per owner.**
+  * The stolen table records whom each item was taken from (NPC or
+    faction).
+  * A merchant refuses to buy goods stolen from them or their faction (a
+    new `refuses` host hook in `rpg_sell`); other merchants still buy them.
+  * The owner check of theft now treats a living copy of the owner as an
+    owner (only a dead owner owns nothing).
+
+### Test world additions
+* Recorded voices: the Elder's greeting, the guard's "Hello", battle cries
+  "Attack" and "Hit".
+* A region sleep list (critter from level 1, snapper from level 20).
+* A bow and arrows.
+
+### Verification run
+* `make` → `EBOOT.PBP` (759 KB), zero warnings under `-Werror`; static
+  image 36.0 MB including the 32 MB arena.
+* `make test`:
+  * 102 host checks.
+  * **148 cooker tests**, adding actor templates, voice files and the
+    region sleep list.
+  * World test; game test 40/40; rpg 73/73; mech 111/111; audio 32/32;
+    ai 56/56; save 26/26.
+  * ui 170/170. The count depends on how many swings the AI-driven critter
+    fight takes.
+  * **persist test 73/73** (new):
+    * Voices: the guard's hello with voice and subtitle, the Elder's
+      greeting voice, battle cries chosen per speaker.
+    * Spawning: an item and an NPC copy from its template.
+    * The player's arrow in flight, landing on a critter that turns on the
+      archer; an arrow stopped by a wall; no shot without ammunition.
+    * A frost bolt that takes time to arrive and freezes its target and
+      the critter beside it.
+    * An NPC archer shooting from range with its own arrows.
+    * Merchants refusing goods stolen from them and their faction, while
+      honest goods sell.
+    * Leveled sleep creatures by level; rest interrupted by a critter and
+      no further sleep beside it; waiting uninterrupted.
+    * The Elder keeping his place; the Weaver following into the cellar
+      with a summon, staying there, missing from her house through a save
+      and load, found in the cellar exactly once, following home again.
+
+### Deferred (not part of this plan)
+* Stolen goods are counted per item and owner, not per stack: if you carry
+  an honest and a stolen copy of the same item, its owner refuses both.
+* Shots in flight are not saved, and they vanish on a zone change. Arrows
+  that miss do not stay in walls.
+* The ammo model is drawn with its +Y axis along the flight. Whether
+  retail arrow models point that way has not been checked; if not, it is a
+  one-line axis swap in `game_shot_matrix`.
+
+### Still not verified
+1. Nothing has run on a PSP or in PPSSPP. The new prop pass (ammo models,
+   additive bolt glows) is compiled for the GE but has not been seen.
+2. No retail data has been cooked here, so the actor templates, voices and
+   sleep lists of the real game are untested.
 
 ## Milestone 6 — delivered
 

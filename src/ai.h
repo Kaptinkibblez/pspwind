@@ -97,6 +97,7 @@ typedef struct {
     /* persistent (survives zone changes, saved) */
     uint32_t stolen_item[AI_STOLEN_MAX];
     int32_t stolen_count[AI_STOLEN_MAX];
+    uint32_t stolen_owner[AI_STOLEN_MAX]; /* NPC or faction robbed */
     uint32_t stolen_used;
     uint32_t spawn_serial;
     /* per frame */
@@ -133,12 +134,17 @@ int ai_has_los(struct Game *g, int actor);
 
 /* Crime by the player; victim actor or -1; owner hash of stolen goods. */
 int ai_crime(struct Game *g, int type, int victim, uint32_t owner, int value);
-void ai_mark_stolen(struct Game *g, uint32_t item, int32_t count);
+void ai_mark_stolen(struct Game *g, uint32_t item, uint32_t owner, int32_t count);
+/* stolen goods the player carries of item taken from owner (NPC object or
+ * faction hash) */
+int32_t ai_stolen_from(struct Game *g, uint32_t item, uint32_t owner);
 void ai_pay_fine(struct Game *g, int thief);
 void ai_go_to_jail(struct Game *g);
 
-/* Spawning: a creature next to pos; returns the actor index or -1. */
-int ai_spawn(struct Game *g, uint32_t object, const float pos[3], float yaw, int ally, float life);
+/* Spawning: an NPC or creature (assembled from its cooked template) at pos;
+ * key 0 makes a new individual, else the reference key it keeps (followers
+ * changing zones). Returns the actor index or -1. */
+int ai_spawn(struct Game *g, uint32_t object, const float pos[3], float yaw, int ally, float life, uint32_t key);
 void ai_despawn(struct Game *g, int actor);
 
 int ai_is_guard(struct Game *g, int actor);

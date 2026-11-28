@@ -60,6 +60,9 @@ typedef struct {
     uint32_t infos_tested;
     char text[DLG_TEXT_MAX];
     char fixed[DLG_TEXT_MAX];
+    /* recorded voice of a response (INFO sound file): played by the host */
+    void (*voice)(void *user, uint32_t sound, const VmRef *speaker);
+    void *voice_user;
 } Dialogue;
 
 int dlg_init(Dialogue *d, Vm *vm, RpgDb *db);
@@ -74,6 +77,11 @@ int dlg_service_refused(Dialogue *d);
 /* Answers from a Persuasion-type topic ("admire success", "bribe fail"...,
  * lower case): the first matching info is shown; returns 0 when none. */
 int dlg_say(Dialogue *d, const char *topic);
+/* A Voice-type line (Hello, Idle, Attack, Hit, Flee, Thief...) the speaker
+ * would say now, outside conversations: sound file and expanded subtitle.
+ * Returns 0 when none matches or a conversation is open. */
+int dlg_voice_line(Dialogue *d, const VmRef *speaker, int creature, const char *topic, uint32_t *sound,
+                   char *text, uint32_t cap);
 
 /* Keyword spans of the listed topics inside text; returns the count. */
 int dlg_links(const Dialogue *d, const char *text, DlgLink *out, int max);

@@ -1593,3 +1593,39 @@ void rpg_chargen(Rpg *r, const char *name, uint32_t race, int female, uint32_t c
     vm_set_prop(r->vm, &pc, MWP_DYN_FATIGUE, rpg_dyn_max(r, &pc, 2));
     r->chargen_done = 1;
 }
+
+uint32_t rpg_leveled(Rpg *r, uint32_t list, int level)
+{
+    int depth;
+    for (depth = 0; depth < 4; ++depth) {
+        const DRpgObject *o = rpg_object(r, list);
+        uint32_t i, n = 0, pick, best_level = 0;
+        if (!o || (o->type != DRPG_OT_LEVC && o->type != DRPG_OT_LEVI))
+            return list;
+        if ((int)(vm_random(r->vm) % 100u) < o->stat[0])
+            return 0;
+        /* "all levels": any entry up to the level; else the highest level reached */
+        for (i = 0; i < o->list_count; ++i) {
+            const DRpgListItem *li = &r->db->lists[o->list_first + i];
+            if (li->count <= level && (uint32_t)li->count > best_level)
+                best_level = (uint32_t)li->count;
+        }
+        for (i = 0; i < o->list_count; ++i) {
+            const DRpgListItem *li = &r->db->lists[o->list_first + i];
+            if (li->count <= level && ((o->flags & DRPG_OF_ALL_LEVELS) || (uint32_t)li->count == best_level))
+                n++;
+        }
+        if (!n)
+            return 0;
+        pick = vm_random(r->vm) % n;
+        for (i = 0; i < o->list_count; ++i) {
+            const DRpgListItem *li = &r->db->lists[o->list_first + i];
+            if (li->count <= level && ((o->flags & DRPG_OF_ALL_LEVELS) || (uint32_t)li->count == best_level) &&
+                pick-- == 0) {
+                list = li->hash;
+                break;
+            }
+        }
+    }
+    return 0;
+}

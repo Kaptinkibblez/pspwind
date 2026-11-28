@@ -443,52 +443,62 @@ class WorldBuilder:
                 chosen[bp.body[0]] = bp
         return [chosen[k] for k in sorted(chosen)]
 
-    def add_actor(self, zone: dzone.Zone, cell: dzone.ZCell, ref: esm.CellRef,
-                  obj: esm.ObjectDef, content: int, index: int) -> None:
+    def assemble_actor(self, obj: esm.ObjectDef) -> Tuple[int, str, str, List[Tuple[str, int, bool]]]:
+        """(flags, skeleton key, animation key, [(part mesh key, bone hash, mirrored)])
+        for an NPC or creature record: the same assembly placed actors and
+        runtime templates use."""
         flags = 0
-        parts: List[Tuple[int, int, bool]] = []
-        anim_key = ""
+        parts: List[Tuple[str, int, bool]] = []
         if obj.type == "CREA":
             flags |= dzone.ACTOR_F_CREATURE
             base = dmcommon.mesh_key(obj.model) if obj.model else ""
             xkey = self.x_variant(base) if base else ""
             skel_key = xkey if xkey and self.meshes.get(xkey) is not None else base
-            anim_key = xkey
+            return flags, skel_key, xkey, parts
+        race = self.world.races.get(obj.race.lower(), {})
+        beast = bool(race.get("flags", 0) & RACE_F_BEAST)
+        female = bool(obj.npc_flags & NPC_F_FEMALE)
+        if beast:
+            flags |= dzone.ACTOR_F_BEAST
+        if female:
+            flags |= dzone.ACTOR_F_FEMALE
+        if obj.model:
+            skel_key = dmcommon.mesh_key(obj.model)
         else:
-            race = self.world.races.get(obj.race.lower(), {})
-            beast = bool(race.get("flags", 0) & RACE_F_BEAST)
-            female = bool(obj.npc_flags & NPC_F_FEMALE)
-            if beast:
-                flags |= dzone.ACTOR_F_BEAST
-            if female:
-                flags |= dzone.ACTOR_F_FEMALE
-            if obj.model:
-                skel_key = dmcommon.mesh_key(obj.model)
-                anim_key = self.x_variant(skel_key)
-            else:
-                candidates = (["base_animkna"] if beast else
-                              (["base_anim_female", "base_anim"] if female else ["base_anim"]))
-                skel_key = next((k for k in candidates if self.meshes.get(k) is not None),
-                                candidates[-1])
-                anim_key = self.x_variant(skel_key)
-            seen_skinned: Set[int] = set()
-            for bp in self.body_parts(obj, female):
-                mi = self.zone_mesh(zone, dmcommon.mesh_key(bp.model) if bp.model else "")
-                if mi is None:
-                    continue
-                dm = self.meshes.get(zone.meshes[mi])
-                skinned = any(b["flags"] & dmesh.BATCH_F_SEGMENT for b in dm["batches"])
-                if skinned:
-                    if mi not in seen_skinned:  # segments bind to bones by name
-                        seen_skinned.add(mi)
-                        parts.append((mi, 0, False))
-                    continue
-                bones = PART_BONES.get(bp.body[0], ())
-                for side, bone in enumerate(bones):
-                    parts.append((mi, fnv1a32(bone), side == 1))
-            if len(parts) > dzone.ACTOR_MAX_PARTS:
-                self.warnings.append(f"{obj.id}: {len(parts)} body parts, keeping 16")
-                parts = parts[:dzone.ACTOR_MAX_PARTS]
+            candidates = (["base_animkna"] if beast else
+                          (["base_anim_female", "base_anim"] if female else ["base_anim"]))
+            skel_key = next((k for k in candidates if self.meshes.get(k) is not None), candidates[-1])
+        anim_key = self.x_variant(skel_key)
+        seen_skinned: Set[str] = set()
+        for bp in self.body_parts(obj, female):
+            key = dmcommon.mesh_key(bp.model) if bp.model else ""
+            dm = self.meshes.get(key) if key else None
+            if dm is None:
+                if key:
+                    self.missing_models.add(key)
+                continue
+            skinned = any(b["flags"] & dmesh.BATCH_F_SEGMENT for b in dm["batches"])
+            if skinned:
+                if key not in seen_skinned:  # segments bind to bones by name
+                    seen_skinned.add(key)
+                    parts.append((key, 0, False))
+                continue
+            bones = PART_BONES.get(bp.body[0], ())
+            for side, bone in enumerate(bones):
+                parts.append((key, fnv1a32(bone), side == 1))
+        if len(parts) > dzone.ACTOR_MAX_PARTS:
+            self.warnings.append(f"{obj.id}: {len(parts)} body parts, keeping 16")
+            parts = parts[:dzone.ACTOR_MAX_PARTS]
+        return flags, skel_key, anim_key, parts
+
+    def add_actor(self, zone: dzone.Zone, cell: dzone.ZCell, ref: esm.CellRef,
+                  obj: esm.ObjectDef, content: int, index: int) -> None:
+        flags, skel_key, anim_key, keyed = self.assemble_actor(obj)
+        parts: List[Tuple[int, int, bool]] = []
+        for key, bone, mirrored in keyed:
+            mi = self.zone_mesh(zone, key)
+            if mi is not None:
+                parts.append((mi, bone, mirrored))
         skel = self.zone_mesh(zone, skel_key)
         kind = dzone.INST_CREATURE if obj.type == "CREA" else dzone.INST_NPC
         iflags = dzone.IF_ACTOR | (dzone.IF_PERSISTENT if ref.persistent else 0)
@@ -674,12 +684,26 @@ def cook_world(content: Sequence[str], meshes_path: Optional[str], out_dir: str,
                         ext_map[(x, y)] = zi
     out.add("world", dzone.write_world(cfg.zone_size, builder.zone_entries, ext_map,
                                        builder.int_zone))
+    # runtime spawning (followers, PlaceAtPC, sleep creatures): one template per actor record
+    templates = 0
+    for oid, obj in sorted(world.objects.items()):
+        if obj.type not in ("NPC_", "CREA"):
+            continue
+        flags, skel_key, anim_key, parts = builder.assemble_actor(obj)
+        if not skel_key or builder.meshes.get(skel_key) is None:
+            continue
+        out.add("actor/" + oid.lower(), dzone.write_actor_template(
+            flags, fnv1a32(skel_key),
+            fnv1a32(anim_key) if anims is not None and anim_key in anims.entries else 0,
+            [(fnv1a32(k), bone, mirrored) for k, bone, mirrored in parts]))
+        templates += 1
     os.makedirs(out_dir, exist_ok=True)
     size = out.write(os.path.join(out_dir, "zones.dpak"))
     manifest = {"config": asdict(cfg), "content": [os.path.basename(c) for c in content],
                 "zones": zones_info, "textures": sorted(builder.textures_used),
                 "missing_models": sorted(builder.missing_models),
-                "warnings": world.warnings + builder.warnings, "pack_bytes": size}
+                "warnings": world.warnings + builder.warnings, "pack_bytes": size,
+                "actor_templates": templates}
     with open(os.path.join(out_dir, "zones_manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=1)
     LOG.info("wrote zones.dpak: %d zones, %.1f KB, %d warnings, %.1fs", len(zones_info),

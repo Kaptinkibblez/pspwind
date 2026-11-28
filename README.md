@@ -113,8 +113,10 @@ quest via the dialogue engine + bytecode fuzzing; `mech_test`: character
 creation, levelling, combat, magic, items, trade, services and crafting
 numbers against Morrowind's formulas; `audio_test`: the mixer on the cooked
 sounds; `ai_test`: path finding, wandering, packages, combat, sneaking,
-crime, guards, jail and summons; `save_test`: save round trips and damaged
-or fuzzed files) and plays the test quest plus every M5/M6 screen through
+crime, guards, jail and summons; `persist_test`: voices, spawning, arrows
+and spell bolts in flight, stolen goods, rest interruption, actors keeping
+their place, followers through doors, the roaming table across a save;
+`save_test`: save round trips and damaged or fuzzed files) and plays the test quest plus every M5/M6 screen through
 the UI with button presses (`ui_test`, screenshots in
 `build/host/screens/`). None of them needs the PSP toolchain.
 
@@ -215,3 +217,13 @@ and play time; ✕ saves (twice to overwrite) or loads, ○ back. After death,
 
 Walking off an exterior zone loads the neighbouring zone behind a loading
 card; activating a door with a destination loads the target cell.
+Followers and summoned creatures near you come along. Everyone else stays
+where you left them, and the game remembers this across zones and saves.
+
+The world in play:
+
+* Arrows, bolts, thrown weapons and target spells fly, and can be dodged.
+* NPCs speak their recorded greetings, battle cries and idle lines, with
+  subtitles.
+* Sleeping outdoors may be cut short by a local creature.
+* Merchants will not buy back what you stole from them or their guild.

@@ -552,11 +552,21 @@ static void update_rest(Ui *ui, const InputState *in)
     }
     if (p & GB_CROSS) {
         Rpg *r = ui_rpg(ui);
-        int h = rpg_rest(r, ui->rest_hours, ui->rest_sleep);
-        char msg[64];
-        snprintf(msg, sizeof(msg), "%s %d hour%s.", ui->rest_sleep ? "You rested for" : "You waited for", h,
-                 h == 1 ? "" : "s");
-        ui_toast(ui, msg);
+        char msg[96], woke[96];
+        int h = game_rest(ui->g, ui->rest_hours, ui->rest_sleep, woke, sizeof(woke));
+        if (h > 0) {
+            snprintf(msg, sizeof(msg), "%s %d hour%s.", ui->rest_sleep ? "You rested for" : "You waited for", h,
+                     h == 1 ? "" : "s");
+            ui_toast(ui, msg);
+        }
+        if (woke[0]) {
+            /* interrupted (or an enemy came close since the menu opened):
+             * no level up while something attacks */
+            ui_toast(ui, woke);
+            ui->return_mode = UI_NONE;
+            ui_close(ui);
+            return;
+        }
         ui->return_mode = UI_NONE;
         if (ui->rest_sleep && r->level_pending && !ui->g->player_dead)
             ui_open_levelup(ui);

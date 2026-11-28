@@ -1052,10 +1052,13 @@ static float weapon_damage(const DRpgObject *w, float strength, const DRpgObject
     return best;
 }
 
-RpgHit rpg_attack(Rpg *r, const VmRef *att, const VmRef *vic, float strength)
+/* shot: a projectile landing; weapon and ammo are what was fired (the
+ * launcher already lost the ammo and may hold something else by now) */
+static RpgHit attack(Rpg *r, const VmRef *att, const VmRef *vic, float strength, int shot, const DRpgObject *shot_w,
+                     const DRpgObject *shot_ammo)
 {
     RpgHit hit;
-    int wstack, skill;
+    int wstack = -1, skill;
     const DRpgObject *w;
     const DRpgObject *ao = rpg_actor_object(r, att);
     float skill_value, damage = 0.0f, chance;
@@ -1064,11 +1067,12 @@ RpgHit rpg_attack(Rpg *r, const VmRef *att, const VmRef *vic, float strength)
     strength = PW_CLAMP(strength, 0.0f, 1.0f);
     if (rpg_is_dead(r, att) || rpg_is_dead(r, vic))
         return hit;
-    w = weapon_of(r, att, &wstack);
+    w = shot ? shot_w : weapon_of(r, att, &wstack);
     skill = w ? weapon_type_skill(w->stat[0]) : SKILL_HANDTOHAND;
     skill_value = attacker_skill(r, att, skill);
-    /* the attack costs fatigue */
-    rpg_dyn_add(r, att, 2, -(rpg_gmst_f(r, "fFatigueAttackBase", 2.0f) +
+    /* the attack costs fatigue (shots paid when fired) */
+    if (!shot)
+        rpg_dyn_add(r, att, 2, -(rpg_gmst_f(r, "fFatigueAttackBase", 2.0f) +
                              PW_MIN(1.0f, rpg_encumbrance(r, att) / PW_MAX(1.0f, rpg_capacity(r, att))) *
                                  rpg_gmst_f(r, "fFatigueAttackMult", 0.0f) +
                              (w ? w->weight * strength * rpg_gmst_f(r, "fWeaponFatigueMult", 0.25f) : 0.0f)));
@@ -1077,7 +1081,7 @@ RpgHit rpg_attack(Rpg *r, const VmRef *att, const VmRef *vic, float strength)
         vm_set_prop(r->vm, vic, MWP_HOSTILE, 1.0f);
     chance = hit_chance(r, att, vic, skill_value);
     if ((float)rpg_roll100(r) >= chance) {
-        if (w)
+        if (w && wstack >= 0)
             rpg_set_condition(r, wstack, (vm_item_at(r->vm, wstack)->health == VM_FULL
                                               ? rpg_item_health_max(r, w)
                                               : vm_item_at(r->vm, wstack)->health) - 1);
@@ -1085,24 +1089,26 @@ RpgHit rpg_attack(Rpg *r, const VmRef *att, const VmRef *vic, float strength)
     }
     hit.hit = 1;
     if (w) {
-        const VmItem *wi = vm_item_at(r->vm, wstack);
-        const DRpgObject *ammo = NULL;
+        const VmItem *wi = wstack >= 0 ? vm_item_at(r->vm, wstack) : NULL;
+        const DRpgObject *ammo = shot ? shot_ammo : NULL;
         int mx = rpg_item_health_max(r, w), h;
-        if (w->stat[0] == 9 || w->stat[0] == 10) {
+        if (!shot && (w->stat[0] == 9 || w->stat[0] == 10)) {
             int a = rpg_equipped(r, att, RPG_SLOT_AMMO);
             const VmItem *ai = a >= 0 ? vm_item_at(r->vm, a) : NULL;
             ammo = ai ? rpg_object(r, ai->item) : NULL;
         }
         damage = weapon_damage(w, strength, ammo);
-        if (mx > 0 && wi->health != VM_FULL)
+        if (wi && mx > 0 && wi->health != VM_FULL)
             damage *= (float)wi->health / (float)mx;
         damage *= rpg_gmst_f(r, "fDamageStrengthBase", 0.5f) +
                   rpg_attr(r, att, ATTR_STRENGTH) * rpg_gmst_f(r, "fDamageStrengthMult", 0.1f) * 0.1f;
-        h = (wi->health == VM_FULL ? mx : wi->health) -
-            (int)PW_MAX(1.0f, rpg_gmst_f(r, "fWeaponDamageMult", 0.1f) * damage);
-        wstack = rpg_set_condition(r, wstack, h);
-        if (h <= 0)
-            rpg_unequip_slot(r, att, RPG_SLOT_WEAPON);
+        if (wi) {
+            h = (wi->health == VM_FULL ? mx : wi->health) -
+                (int)PW_MAX(1.0f, rpg_gmst_f(r, "fWeaponDamageMult", 0.1f) * damage);
+            wstack = rpg_set_condition(r, wstack, h);
+            if (h <= 0)
+                rpg_unequip_slot(r, att, RPG_SLOT_WEAPON);
+        }
         /* normal weapons against resistant targets */
         if (!w->link[0] && !(w->stat[5] & 0x3)) {
             float res = rpg_effect(r, vic, MGEF_RESIST_NORMAL_WEAPONS, -1) -
@@ -1142,8 +1148,18 @@ RpgHit rpg_attack(Rpg *r, const VmRef *att, const VmRef *vic, float strength)
         rpg_damage(r, vic, 0, damage, att);
     else
         rpg_dyn_add(r, vic, 2, -damage);
+    /* enchanted ammo and thrown weapons spend their enchantment on the hit */
+    if (shot && !rpg_is_dead(r, vic)) {
+        const DRpgObject *carrier = shot_ammo ? shot_ammo : (w && w->stat[0] == 11 ? w : NULL);
+        const DRpgSpell *en = carrier && carrier->link[0] ? rpg_spell(r, carrier->link[0]) : NULL;
+        if (en && en->kind == 1 && en->type == 1) {
+            int n;
+            const DRpgEffect *e = rpg_spell_effects(r, en, &n);
+            rpg_apply(r, att, vic, e, n, RPG_RANGE_TOUCH, en->hash, 100.0f, 1);
+        }
+    }
     /* cast-when-strikes enchantments */
-    if (w && w->link[0] && !rpg_is_dead(r, vic)) {
+    if (!shot && w && w->link[0] && !rpg_is_dead(r, vic)) {
         const DRpgSpell *en = rpg_spell(r, w->link[0]);
         VmItem *wi = wstack >= 0 ? vm_item_at(r->vm, wstack) : NULL;
         if (en && en->kind == 1 && en->type == 1 && wi && wi->count > 0) {
@@ -1160,6 +1176,34 @@ RpgHit rpg_attack(Rpg *r, const VmRef *att, const VmRef *vic, float strength)
     }
     hit.killed = rpg_is_dead(r, vic);
     return hit;
+}
+
+RpgHit rpg_attack(Rpg *r, const VmRef *att, const VmRef *vic, float strength)
+{
+    return attack(r, att, vic, strength, 0, NULL, NULL);
+}
+
+RpgHit rpg_attack_shot(Rpg *r, const VmRef *att, const VmRef *vic, float strength, uint32_t weapon, uint32_t ammo)
+{
+    const DRpgObject *w = rpg_object(r, weapon), *a = ammo ? rpg_object(r, ammo) : NULL;
+    return attack(r, att, vic, strength, 1, w && w->type == DRPG_OT_WEAP ? w : NULL,
+                  a && a->type == DRPG_OT_WEAP ? a : NULL);
+}
+
+int rpg_shot_items(Rpg *r, const VmRef *ref, uint32_t *weapon, uint32_t *ammo)
+{
+    int st, a;
+    const DRpgObject *w = weapon_of(r, ref, &st);
+    *weapon = *ammo = 0;
+    if (!w || w->stat[0] < 9 || w->stat[0] > 11)
+        return 0;
+    *weapon = vm_item_at(r->vm, st)->item;
+    if (w->stat[0] != 11) {
+        a = rpg_equipped(r, ref, RPG_SLOT_AMMO);
+        if (a >= 0)
+            *ammo = vm_item_at(r->vm, a)->item;
+    }
+    return 1;
 }
 
 int rpg_pick_lock(Rpg *r, const VmRef *target, int lock_level, int *new_level, char *msg, uint32_t cap)
